@@ -1,25 +1,33 @@
 import jax.numpy as jnp
 import jax
 
-def hamiltonian(
-    s : jnp.ndarray,
-    t : None,
-    Omega : float):
+@jax.jit
+def lmg_eom(
+    s : jnp.ndarray, 
+    t : None, 
+    args : list[float, float]):
     """
-    Defines the classical Hamiltonian H(s) = Omega * s_x.
+    Computes the time derivative ds/dt using the Spin Poisson Bracket.
+    Formula: ds/dt = {s, H} = 2 * (grad_H x s)
     
     Args:
-        s: Spin vector of shape (3,). s[0]=x, s[1]=y, s[2]=z.
-        t: Time (unused for static drive, but required for ODE solvers).
-        Omega: Rabi frequency.
-    
+        s: Spin vector (3,).
+        t: Time.
+        args: System parameters passed to Hamiltonian.
+         
     Returns:
-        Scalar energy value.
+        ds_dt: Vector of shape (3,) representing velocity in phase space.
     """
-    return Omega * s[0]
+    Omega, Chi = args
+    def H(state):
+        # Linear Drive + Non-Linear Twisting
+        return Omega * state[0] + Chi * (state[2]**2)
+    
+    dH_ds = jax.grad(H)(s)
+    return 2.0 * jnp.cross(dH_ds, s)
 
 @jax.jit
-def spin_eom(
+def linear_eom(
     s : jnp.ndarray,
     t : None, 
     Omega : float):
@@ -35,14 +43,10 @@ def spin_eom(
     Returns:
         ds_dt: Vector of shape (3,) representing velocity in phase space.
     """
-    # 1. Calculate Gradient of Hamiltonian
     # jax.grad automatically computes (dH/ds_x, dH/ds_y, dH/ds_z)
-    dH_ds = jax.grad(hamiltonian, argnums=0)(s, t, Omega)
-    
-    # 2. Apply the Spin Precession Rule
-    # The factor of 2.0 comes from the Pauli algebra {s_i, s_j} = 2*epsilon*s_k
-    ds_dt = 2.0*jnp.cross(dH_ds, s)
-    
-    return ds_dt
+    def H(state):
+        return Omega*state[0]    
+    dH_ds = jax.grad(H)(s)
+    return 2.0 * jnp.cross(dH_ds, s)
 
 
