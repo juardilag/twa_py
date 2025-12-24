@@ -33,3 +33,24 @@ def discrete_spin_sampling(
     s_init = jnp.stack([sx, sy, sz], axis=1)
     
     return s_init
+
+
+def continious_spin_sampling(
+    key, 
+    n_traj : int):
+    """
+    Generates N initial spin vectors using gaussian sampling.
+    
+    Args:
+        key: JAX PRNGKey for reproducibility.
+        n_trajectories: Number of trajectories to simulate (N).
+    Returns:
+        s_init: Array of shape (n_trajectories, 3).
+    """
+    k1, k2 = jax.random.split(key)
+    # Normal(0, 1) to match variance <sigma^2>=1
+    sx = jax.random.normal(k1, (n_traj,)) 
+    sy = jax.random.normal(k2, (n_traj,))
+    # Fixed mean for z (approximate, ignores longitudinal noise)
+    sz = jnp.full((n_traj,), -1.0)
+    return jnp.stack([sx, sy, sz], axis=1)

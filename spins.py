@@ -41,7 +41,7 @@ def spin_eom(
     
     # 2. Apply the Spin Precession Rule
     # The factor of 2.0 comes from the Pauli algebra {s_i, s_j} = 2*epsilon*s_k
-    ds_dt = 2.0 * jnp.cross(dH_ds, s)
+    ds_dt = 2.0*jnp.cross(dH_ds, s)
     
     return ds_dt
 
