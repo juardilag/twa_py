@@ -1,7 +1,6 @@
 import jax.numpy as jnp
 import jax
 
-@jax.jit
 def spin_poisson_bracket(
     grad_A : jnp.ndarray, 
     grad_B : jnp.ndarray, 
@@ -31,6 +30,19 @@ def make_system_functions(hamiltonian_func, jump_ops_funcs):
     Returns:
         drift_fn, diffusion_fn (compatible with diffrax)
     """
+
+    def compute_complex_gradient(func, s, args):
+        # 1. Define wrappers for Real and Imag parts (both return Reals)
+        def real_part_fn(s_in): return jnp.real(func(s_in, args))
+        def imag_part_fn(s_in): return jnp.imag(func(s_in, args))
+        
+        # 2. Differentiate them separately using standard jax.grad
+        # grad returns a vector of shape (3,)
+        grad_real = jax.grad(real_part_fn)(s)
+        grad_imag = jax.grad(imag_part_fn)(s)
+        
+        # 3. Recombine
+        return grad_real + 1j * grad_imag
     
     # --- A. The Drift Function (Deterministic Dynamics) ---
     def drift_fn(t, s, args):
@@ -47,7 +59,7 @@ def make_system_functions(hamiltonian_func, jump_ops_funcs):
             L_val = L_func(s, args)
             L_conj_val = jnp.conjugate(L_val)
             
-            grad_L = jax.grad(L_func, argnums=0)(s, args)
+            grad_L = compute_complex_gradient(L_func, s, args)
             grad_L_conj = jnp.conjugate(grad_L)
             
             # Calculate brackets {s, L*} and {L, s}
@@ -74,7 +86,7 @@ def make_system_functions(hamiltonian_func, jump_ops_funcs):
         
         for L_func in jump_ops_funcs:
             # Gradients (Same as drift)
-            grad_L = jax.grad(L_func, argnums=0)(s, args)
+            grad_L = compute_complex_gradient(L_func, s, args)
             grad_L_conj = jnp.conjugate(grad_L)
             
             bracket_s_Lconj = 2.0 * jnp.cross(grad_L_conj, s)
@@ -92,9 +104,9 @@ def make_system_functions(hamiltonian_func, jump_ops_funcs):
             col_real = (c1 + c2)
             col_imag = 1j * (c1 - c2)
             
-            # Append Real parts (s is real vector) and Scale by sqrt(2)
-            noise_columns.append(jnp.real(col_real) * jnp.sqrt(2.0))
-            noise_columns.append(jnp.real(col_imag) * jnp.sqrt(2.0))
+            # Append Real parts (s is real vector) and Scale by 2
+            noise_columns.append(jnp.real(col_real) * 2)
+            noise_columns.append(jnp.real(col_imag) * 2)
             
         if not noise_columns: # Closed System case
             return jnp.zeros((3, 0))
