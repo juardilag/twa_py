@@ -8,7 +8,7 @@ from tqdm import tqdm
 
 def solve_twa_batched_stats(key, n_total, batch_size, t_eval, hamiltonian, jump_ops, args):
     """
-    Runs TWA in batches with CORRECT independent noise for each trajectory.
+    Solves open TWA in batches with independent noise for each trajectory.
     """
     # 1. Setup System Functions
     drift, diffusion = make_system_functions(hamiltonian, jump_ops)
@@ -24,10 +24,8 @@ def solve_twa_batched_stats(key, n_total, batch_size, t_eval, hamiltonian, jump_
         s_batch: (Batch, 3) - Initial states
         keys_batch: (Batch,) - Unique PRNG keys for noise
         """
-        
         # Function to solve ONE trajectory
         def solve_one(s_init, single_noise_key):
-            # --- CRITICAL FIX: Create unique noise path here ---
             if n_noise_channels > 0:
                 bm = diffrax.VirtualBrownianTree(
                     t_eval[0], t_eval[-1], 
