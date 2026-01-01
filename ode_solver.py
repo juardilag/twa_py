@@ -75,24 +75,20 @@ def solve_twa_batched_stats(key, n_total, batch_size, t_eval, hamiltonian, jump_
         # A. Split key for Sampling AND Noise
         sample_key, batch_noise_key = jax.random.split(iter_key)
         
-        # Determine batch size
-        current_batch_size = min(batch_size, n_total - i*batch_size)
-        
-        # B. Sample Initial Conditions
-        s0_batch = discrete_spin_sampling(sample_key, current_batch_size, initial_z=-1.0)
-        
-        # C. Generate BATCH of unique keys for noise
-        keys_batch = jax.random.split(batch_noise_key, current_batch_size)
-        
-        # D. Run Batch (Passing the keys)
-        b_sum, b_sq_sum = run_single_batch(s0_batch, keys_batch)
+        # Always simulate 'batch_size' trajectories
+        current_s0 = discrete_spin_sampling(sample_key, batch_size, initial_z=1.0)
+        current_keys = jax.random.split(batch_noise_key, batch_size)
+
+        # 2. Run the fixed-size batch (Hit the cache every time)
+        b_sum, b_sq_sum = run_single_batch(current_s0, current_keys)
         
         total_sum += b_sum
         total_sq_sum += b_sq_sum
-        
-    # Final Statistics
-    mean_traj = total_sum / n_total
-    var_traj = (total_sq_sum / n_total) - mean_traj**2
+
+    actual_simulated_count = num_batches * batch_size
+    
+    mean_traj = total_sum / actual_simulated_count
+    var_traj = (total_sq_sum / actual_simulated_count) - mean_traj**2
     
     return mean_traj, var_traj
 
