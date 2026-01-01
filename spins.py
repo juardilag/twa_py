@@ -52,8 +52,8 @@ def make_system_functions(hamiltonian_func, jump_ops_funcs):
             bracket_L_s = -2.0 * jnp.cross(grad_L, s)
             
             # Protocol Drift Term:
-            # -(i/4) * [ {s, L*} * L  +  L* * {L, s} ]
-            term = (-1j / 4.0) * (bracket_s_Lconj * L_val + L_conj_val * bracket_L_s)
+            # -(i/2) * [ {s, L*} * L  +  L* * {L, s} ]
+            term = (-1j / 2.0) * (bracket_s_Lconj * L_val + L_conj_val * bracket_L_s)
             
             dissipative_term += jnp.real(term)
             
@@ -75,20 +75,22 @@ def make_system_functions(hamiltonian_func, jump_ops_funcs):
             bracket_L_s     = -2.0 * jnp.cross(grad_L, s)
             
             # Noise Terms from Protocol:
-            # Term = -(i/4) * [ {s, L*} * xi  +  {L, s} * xi* ]
+            # Term = -(i/2) * [ {s, L*} * xi  +  {L, s} * xi* ]
             # xi = xi_R + i * xi_I
-            # Coeff_R = -(i/4) * (Bracket1 + Bracket2)
-            # Coeff_I = -(i/4) * (i * Bracket1 - i * Bracket2) = (1/4)*(Bracket1 - Bracket2)
+            # Coeff_R = -(i/2) * (Bracket1 + Bracket2)
+            # Coeff_I = -(i/2) * (i * Bracket1 - i * Bracket2) = (1/2)*(Bracket1 - Bracket2)
             
-            c1 = (-1j / 4.0) * bracket_s_Lconj
-            c2 = (-1j / 4.0) * bracket_L_s
+            c1 = (-1j / 2.0) * bracket_s_Lconj
+            c2 = (-1j / 2.0) * bracket_L_s
             
             col_real = (c1 + c2)
             col_imag = 1j * (c1 - c2)
             
-            # Append Real parts (s is real vector) and Scale by 2
-            noise_columns.append(jnp.real(col_real) * 2)
-            noise_columns.append(jnp.real(col_imag) * 2)
+            # We need variance <xi xi*> = 2.
+            # Standard solver noise dW has variance 1.
+            # We must multiply by sqrt(2) to get variance 2.
+            noise_columns.append(jnp.real(col_real) * jnp.sqrt(2.0))
+            noise_columns.append(jnp.real(col_imag) * jnp.sqrt(2.0))
             
         if not noise_columns: # Closed System case
             return jnp.zeros((3, 0))
