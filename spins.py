@@ -87,10 +87,8 @@ def make_system_functions(hamiltonian_func, jump_ops_funcs):
             col_imag = 1j * (c1 - c2)
             
             # We need variance <xi xi*> = 2.
-            # Standard solver noise dW has variance 1.
-            # We must multiply by sqrt(2) to get variance 2.
-            noise_columns.append(jnp.real(col_real) * jnp.sqrt(2.0))
-            noise_columns.append(jnp.real(col_imag) * jnp.sqrt(2.0))
+            noise_columns.append(jnp.real(col_real))
+            noise_columns.append(jnp.real(col_imag))
             
         if not noise_columns: # Closed System case
             return jnp.zeros((3, 0))
