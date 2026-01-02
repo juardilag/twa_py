@@ -1,6 +1,6 @@
 import jax
 import jax.numpy as jnp
-from spins import make_system_functions
+from functions import make_spin_system_functions
 from initial_samplings import discrete_spin_sampling
 import diffrax
 from tqdm import tqdm
@@ -11,7 +11,7 @@ def solve_twa_batched_stats(key, n_total, batch_size, t_eval, hamiltonian, jump_
     Solves open TWA in batches with independent noise for each trajectory.
     """
     # 1. Setup System Functions
-    drift, diffusion = make_system_functions(hamiltonian, jump_ops)
+    drift, diffusion = make_spin_system_functions(hamiltonian, jump_ops)
     n_noise_channels = 2 * len(jump_ops)
     
     # 2. Define the Batch Runner (Closure Style)
