@@ -54,3 +54,36 @@ def continious_spin_sampling(
     # Fixed mean for z (approximate, ignores longitudinal noise)
     sz = jnp.full((n_traj,), -1.0)
     return jnp.stack([sx, sy, sz], axis=1)
+
+
+def sample_boson_states(key, n_trajectories, initial_alpha=0.0):
+    """
+    Generates N initial boson states (complex scalars) using Gaussian Wigner sampling.
+    Correct for Coherent States |alpha> and Vacuum |0>.
+    
+    Args:
+        key: JAX PRNGKey.
+        n_trajectories: Number of trajectories.
+        initial_alpha: The complex mean field amplitude (default 0.0 for Vacuum).
+        
+    Returns:
+        a_init: Complex Array of shape (n_trajectories,).
+    """
+    k1, k2 = jax.random.split(key)
+    
+    # 1. Sample standard normal noise N(0, 1)
+    # We need the Wigner width for vacuum: <|delta_a|^2> = 1/2.
+    # This means Real and Imag parts each need Variance = 1/4.
+    # Standard Deviation = sqrt(1/4) = 0.5.
+    
+    noise_real = 0.5 * jax.random.normal(k1, shape=(n_trajectories,))
+    noise_imag = 0.5 * jax.random.normal(k2, shape=(n_trajectories,))
+    
+    # 2. Combine into complex fluctuations
+    # The factor 0.5 ensures that <|noise|^2> = 0.5 (Half photon energy)
+    noise = noise_real + 1j * noise_imag
+    
+    # 3. Add to the mean field value
+    a_init = initial_alpha + noise
+    
+    return a_init
