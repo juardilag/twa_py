@@ -1,7 +1,7 @@
 import jax.numpy as jnp
 import jax
 
-def make_system_functions(hamiltonian_func, jump_ops_funcs):
+def make_spin_system_functions(hamiltonian_func, jump_ops_funcs):
     """
     Constructs the Drift and Diffusion functions for a specific physical model.
     
