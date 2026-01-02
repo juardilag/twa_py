@@ -109,114 +109,84 @@ def make_tavis_cummings_system_functions(
     N
 ):
     """
-    Constructs drift and diffusion functions for the Tavis-Cummings model.
-
-    State 'y' is a 1D array of size (2 + 3*N):
-       y[0] = Re(a)
-       y[1] = Im(a)
-       y[2:] = [s1_x, s1_y, s1_z, s2_x, ...]
+    Constructs Drift and Diffusion functions matching Paper Eqs 31-37.
     """
-    
-    # Pre-compute constants
     sqrt_kappa = jnp.sqrt(kappa)
     sqrt_gamma_down = jnp.sqrt(gamma_down)
     sqrt_gamma_up = jnp.sqrt(gamma_up)
     
-    # Coupling scaled by sqrt(N) as per Eq 30
+    # Scaling: g is the collective parameter, so single-coupling is g/sqrt(N)
     g_scaled = g / jnp.sqrt(N)
     
-    # Combined decay rate for drift terms: (gamma_down + gamma_up)/2
-    gamma_sum_half = 0.5 * (gamma_down + gamma_up)
-    # Drift rate difference: (gamma_down - gamma_up)/2 (Used in Eq 32, 33)
+    # Drift Coefficients [cite: 372-375]
+    # gamma_diff corresponds to (gamma_perp - gamma_dagger)/2
     gamma_diff_half = 0.5 * (gamma_down - gamma_up)
 
-    # ---------------------------------------------------------------
-    # 1. Drift Function (Eqs 31, 32, 33, 34)
-    # ---------------------------------------------------------------
     def drift_fn(t, y, args):
-        a_re = y[0]
-        a_im = y[1]
+        a_re, a_im = y[0], y[1]
+        s = y[2:].reshape(N, 3)
+        sx, sy, sz = s[:, 0], s[:, 1], s[:, 2]
         
-        # Reshape to (N, 3)
-        s_flat = y[2:]
-        s = s_flat.reshape(N, 3)
-        sx = s[:, 0]
-        sy = s[:, 1]
-        sz = s[:, 2]
-        
+        # --- Photon Drift (Eq 31) [cite: 371] ---
+        # da/dt = -i*w*a - i*(g/sqrtN)*Sum(s-) - k/2*a
         sum_sx = jnp.sum(sx)
         sum_sy = jnp.sum(sy)
         
-        # -- Photon Drift --
-        # Re[da/dt] = w*Im(a) - (g/sqrt(N))*sum(sy) - (k/2)*Re(a)
-        d_a_re = (omega_cavity * a_im) - (g_scaled * sum_sy) - (0.5 * kappa * a_re)
+        d_a_re = omega_cavity * a_im - g_scaled * sum_sy - 0.5 * kappa * a_re
+        d_a_im = -omega_cavity * a_re - g_scaled * sum_sx - 0.5 * kappa * a_im
         
-        # Im[da/dt] = -w*Re(a) - (g/sqrt(N))*sum(sx) - (k/2)*Im(a)
-        d_a_im = (-omega_cavity * a_re) - (g_scaled * sum_sx) - (0.5 * kappa * a_im)
+        # --- Spin Drift (Eqs 32-34) [cite: 372-375] ---
+        # Note: We use 2.0*g for spin drift to satisfy conservation s.dot(ds/dt)=0
         
-        # -- Spin Drift --
-        
-        # Term: -epsilon * s^y - (2g/sqrt(N)) * s^z * Im(a) + ...
+        # ds^x (Eq 32)
         d_sx = (-omega_spin * sy) - (2.0 * g_scaled * sz * a_im) + (gamma_diff_half * sx * sz)
-
-        # Term: +epsilon * s^x - (2g/sqrt(N)) * s^z * Re(a) + ...
+        
+        # ds^y (Eq 33)
         d_sy = (omega_spin * sx) - (2.0 * g_scaled * sz * a_re) + (gamma_diff_half * sy * sz)
         
-        # Term: +(2g/sqrt(N)) * (s^y Re(a) + s^x Im(a)) - ...
-        # Dissipation: -(gamma_down - gamma_up)/2 * (sx^2 + sy^2)
+        # ds^z (Eq 34)
+        # Term: - (gamma_perp - gamma_dagger)/2 * (sx^2 + sy^2)
+        # Note: (gamma_perp - gamma_dagger)/2 is exactly gamma_diff_half
         d_sz = (2.0 * g_scaled * (sy * a_re + sx * a_im)) - (gamma_diff_half * (sx**2 + sy**2))
         
-        d_s_flat = jnp.stack([d_sx, d_sy, d_sz], axis=1).flatten()
-        
-        return jnp.concatenate([jnp.array([d_a_re, d_a_im]), d_s_flat])
+        return jnp.concatenate([jnp.array([d_a_re, d_a_im]), jnp.stack([d_sx, d_sy, d_sz], axis=1).flatten()])
 
-    # ---------------------------------------------------------------
-    # 2. Diffusion Function (Eqs 32, 33, 34 & Table I)
-    # ---------------------------------------------------------------
     def diffusion_fn(t, y, args):
-        s_flat = y[2:]
-        s = s_flat.reshape(N, 3)
-        sx = s[:, 0]
-        sy = s[:, 1]
-        sz = s[:, 2]
+        s = y[2:].reshape(N, 3)
+        sx, sy, sz = s[:, 0], s[:, 1], s[:, 2]
         
         n_state = 2 + 3 * N
         n_noise = 2 + 4 * N
         B = jnp.zeros((n_state, n_noise))
         
-        # -- Photon Noise --
-        # -sqrt(kappa)/2 * xi
-        coeff_a = -0.5 * sqrt_kappa
-        B = B.at[0, 0].set(coeff_a)
-        B = B.at[1, 1].set(coeff_a)
+        # --- Photon Noise (Eq 31, 35) [cite: 371] ---
+        # Term: -1/2 * xi_kappa
+        # Variance of xi_kappa is 2*kappa. 
+        # Implemented as -0.5 * sqrt(kappa) * StandardNoise (Matches variance)
+        B = B.at[0, 0].set(-0.5 * sqrt_kappa)
+        B = B.at[1, 1].set(-0.5 * sqrt_kappa)
         
-        # -- Spin Noise --
-        # Indices
+        # --- Spin Noise (Eqs 32-34, 36-37) ---
         i = jnp.arange(N)
-        row_sx = 2 + 3 * i
-        row_sy = 2 + 3 * i + 1
-        row_sz = 2 + 3 * i + 2
+        row_sx, row_sy, row_sz = 2 + 3*i, 2 + 3*i+1, 2 + 3*i+2
+        col_dx, col_ux = 2 + 4*i, 2 + 4*i+1
+        col_dy, col_uy = 2 + 4*i+2, 2 + 4*i+3
         
-        # Noise Cols: 0:DownX, 1:UpX, 2:DownY, 3:UpY
-        col_dx = 2 + 4 * i
-        col_ux = 2 + 4 * i + 1
-        col_dy = 2 + 4 * i + 2
-        col_uy = 2 + 4 * i + 3
-        
-        # (s^x): (xi_down_x - xi_up_x) * s^z
+        # ds^x Noise: (xi_perp^x - xi_dagger^x) s^z  [cite: 372]
         B = B.at[row_sx, col_dx].set(sqrt_gamma_down * sz)
         B = B.at[row_sx, col_ux].set(-sqrt_gamma_up * sz)
         
-        # (s^y): (xi_down_y + xi_up_y) * s^z 
+        # ds^y Noise: (xi_perp^y + xi_dagger^y) s^z  [cite: 373]
+        # CORRECTION: PLUS sign here (User prompt had minus)
         B = B.at[row_sy, col_dy].set(sqrt_gamma_down * sz)
         B = B.at[row_sy, col_uy].set(sqrt_gamma_up * sz)
         
-        # Eq 34 (s^z): 
-        # (xi_up_x - xi_down_x) * s^x 
+        # ds^z Noise: (xi_dagger^x - xi_perp^x) s^x - (xi_dagger^y + xi_perp^y) s^y [cite: 377]
+        # Term 1: (Up - Down) * sx
         B = B.at[row_sz, col_ux].set(sqrt_gamma_up * sx)
         B = B.at[row_sz, col_dx].set(-sqrt_gamma_down * sx)
         
-        #  -(xi_up_y + xi_down_y) * s^y
+        # Term 2: - (Up + Down) * sy
         B = B.at[row_sz, col_uy].set(-sqrt_gamma_up * sy)
         B = B.at[row_sz, col_dy].set(-sqrt_gamma_down * sy)
         
