@@ -59,15 +59,22 @@ def run_benchmark(trajectory_counts, params):
         print(f"\n--- Benchmarking N_traj = {n} ---")
 
         # Single Core JIT Execution
-        y0, keys = get_data(n, cpu)
-        _ = solve_one(y0[0], keys[0]) # Warmup
-
-        start = time.time()
-        for i in range(n):
-            _ = solve_one(y0[i], keys[i])
-        end = time.time()
-        results.append({"n_traj": n, "device": "Naive Loop (CPU)", "time": end - start})
-        print(f"Naive Loop: {end-start:.4f} s")
+        # Only for small N because it's terribly slow
+        if n <= 1000: 
+            y0, keys = get_data(n, cpu)
+            # Warmup
+            _ = solve_one(y0[0], keys[0]) 
+            
+            start = time.time()
+            # The "For Loop" approach
+            for i in range(n):
+                _ = solve_one(y0[i], keys[i])
+            end = time.time()
+            results.append({"n_traj": n, "device": "Naive Loop (CPU)", "time": end - start})
+            print(f"Naive Loop: {end-start:.4f} s")
+        else:
+            # Estimate linear scaling for plotting
+            results.append({"n_traj": n, "device": "Naive Loop (CPU)", "time": None})
 
         # Multicore CPU JIT Execution
         y0, keys = get_data(n, cpu)
