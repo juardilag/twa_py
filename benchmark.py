@@ -79,7 +79,7 @@ def run_benchmark(trajectory_counts, params):
         results.append({"n_traj": n, "device": "Vectorized CPU", "time": end - start})
         print(f"Vectorized CPU: {end-start:.4f} s")
 
-        # Vectorized GPY JIT Execution
+        # Vectorized GPU JIT Execution
 
         y0, keys = get_data(n, gpu)
         _ = solve_batch(y0, keys).block_until_ready() # Warmup
@@ -90,7 +90,7 @@ def run_benchmark(trajectory_counts, params):
         results.append({"n_traj": n, "device": "Vectorized GPU", "time": end - start})
         print(f"Vectorized GPU: {end-start:.4f} s")
 
-        return pd.DataFrame(results)
+    return pd.DataFrame(results)
 
 
 
