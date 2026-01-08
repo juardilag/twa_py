@@ -1,9 +1,9 @@
 import jax
 import jax.numpy as jnp
-from functions import make_spin_system_functions, make_tavis_cummings_system_functions
-from initial_samplings import discrete_spin_sampling, boson_sampling
+from functions import make_tavis_cummings_system_functions
+import time
 import diffrax
-from tqdm import tqdm
+import pandas as pd
 
 def run_benchmark(trajectory_counts, params):
     
@@ -52,3 +52,46 @@ def run_benchmark(trajectory_counts, params):
         
         # Move to device
         return jax.device_put(y0, device), jax.device_put(keys, device)
+    
+    results = []
+
+    for n in trajectory_counts:
+        print(f"\n--- Benchmarking N_traj = {n} ---")
+
+        # Single Core JIT Execution
+        y0, keys = get_data(n, cpu)
+        _ = solve_one(y0[0], keys[0]) # Warmup
+
+        start = time.time()
+        for i in range(n):
+            _ = solve_one(y0[i], keys[i])
+        end = time.time()
+        results.append({"n_traj": n, "device": "Naive Loop (CPU)", "time": end - start})
+        print(f"Naive Loop: {end-start:.4f} s")
+
+        # Multicore CPU JIT Execution
+        y0, keys = get_data(n, cpu)
+        _ = solve_batch(y0, keys).block_until_ready() # Warmup 
+
+        start = time.time()
+        _ = solve_batch(y0, keys).block_until_ready()
+        end = time.time()
+        results.append({"n_traj": n, "device": "Vectorized CPU", "time": end - start})
+        print(f"Vectorized CPU: {end-start:.4f} s")
+
+        # Vectorized GPY JIT Execution
+
+        y0, keys = get_data(n, gpu)
+        _ = solve_batch(y0, keys).block_until_ready() # Warmup
+        
+        start = time.time()
+        _ = solve_batch(y0, keys).block_until_ready()
+        end = time.time()
+        results.append({"n_traj": n, "device": "Vectorized GPU", "time": end - start})
+        print(f"Vectorized GPU: {end-start:.4f} s")
+
+        return pd.DataFrame(results)
+
+
+
+
