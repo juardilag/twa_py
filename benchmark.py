@@ -71,24 +71,18 @@ def run_benchmark(trajectory_counts, params):
                 _ = solve_one(y0[i], keys[i])
             end = time.time()
             results.append({"n_traj": n, "device": "Naive Loop (CPU)", "time": end - start})
-            print(f"Naive Loop: {end-start:.4f} s")
         else:
             # Estimate linear scaling for plotting
             results.append({"n_traj": n, "device": "Naive Loop (CPU)", "time": None})
 
-        # Multicore CPU JIT Execution
-        if n <= 10000:
-            y0, keys = get_data(n, cpu)
-            _ = solve_batch(y0, keys).block_until_ready() # Warmup 
+        # Multicore JIT Execution
+        y0, keys = get_data(n, cpu)
+        _ = solve_batch(y0, keys).block_until_ready() # Warmup 
 
-            start = time.time()
-            _ = solve_batch(y0, keys).block_until_ready()
-            end = time.time()
-            results.append({"n_traj": n, "device": "Vectorized CPU", "time": end - start})
-            print(f"Vectorized CPU: {end-start:.4f} s")
-        else:
-            # Estimate linear scaling for plotting
-            results.append({"n_traj": n, "device": "Naive Loop (CPU)", "time": None})
+        start = time.time()
+        _ = solve_batch(y0, keys).block_until_ready()
+        end = time.time()
+        results.append({"n_traj": n, "device": "Vectorized CPU", "time": end - start})
 
         # Vectorized GPU JIT Execution
         y0, keys = get_data(n, gpu)
@@ -98,7 +92,6 @@ def run_benchmark(trajectory_counts, params):
         _ = solve_batch(y0, keys).block_until_ready()
         end = time.time()
         results.append({"n_traj": n, "device": "Vectorized GPU", "time": end - start})
-        print(f"Vectorized GPU: {end-start:.4f} s")
 
     return pd.DataFrame(results)
 
