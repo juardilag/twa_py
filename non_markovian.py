@@ -1,6 +1,7 @@
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
+import optax
 
 # Enable 64-bit precision for better numerical stability in physics simulations
 jax.config.update("jax_enable_x64", True)
@@ -114,3 +115,107 @@ def compute_correlation_function(times, spectral_density_fn, beta, w_max, n_step
     C_t = jax.vmap(integrate_single_time)(times)
     
     return C_t
+
+
+def fit_correlation_function(times, C_target, n_modes=3, learning_rate=0.01, epochs=5000):
+    """
+    Fits the correlation function C(t) to a sum of exponentials using Optax.
+    
+    Ansatz: C_model(t) = sum_k c_k * exp(-gamma_k * t)
+    
+    Parameters:
+    -----------
+    times : jnp.array
+        Time points corresponding to the data.
+    C_target : jnp.array (complex)
+        The target correlation function values.
+    n_modes : int
+        Number of exponential modes (auxiliary variables) to use.
+    
+    Returns:
+    --------
+    fitted_params : dict
+        The optimized parameters (weights c_k and rates gamma_k).
+    model_prediction : jnp.array
+        The reconstructed C(t) from the fit.
+    """
+    
+    # 1. Initialize Parameters
+    # We need complex weights (c) and complex rates (gamma).
+    # We store Real/Imag parts separately to enforce constraints easily.
+    key = jax.random.PRNGKey(42)
+    k1, k2, k3, k4 = jax.random.split(key, 4)
+    
+    params = {
+        # Weights c_k = (cr + 1j * ci)
+        "c_real": jax.random.normal(k1, (n_modes,)) * 10.0,
+        "c_imag": jax.random.normal(k2, (n_modes,)) * 10.0,
+        
+        # Rates gamma_k = (gr + 1j * gi)
+        # We initialize gr positive.
+        "gamma_real": jax.random.uniform(k3, (n_modes,), minval=0.1, maxval=2.0),
+        "gamma_imag": jax.random.normal(k4, (n_modes,)) * 0.5
+    }
+    
+    # 2. Define the Model (Ansatz)
+    def forward(params, t):
+        # Enforce Stability: Re[gamma] must be > 0
+        # softplus(x) = log(1 + exp(x)) ensures positivity
+        gammas = jax.nn.softplus(params["gamma_real"]) + 1j * params["gamma_imag"]
+        weights = params["c_real"] + 1j * params["c_imag"]
+        
+        # Compute sum_k c_k * exp(-gamma_k * t)
+        # We use vmap to broadcast over the modes for a single time t
+        # But since t is an array, we need to handle shapes carefully.
+        
+        # Shape: (n_modes, 1) * (1, n_times) -> (n_modes, n_times)
+        exponents = jnp.exp(-gammas[:, None] * t[None, :])
+        terms = weights[:, None] * exponents
+        
+        # Sum over modes to get C(t)
+        return jnp.sum(terms, axis=0)
+
+    # 3. Define Loss Function (Mean Squared Error on Complex Plane)
+    def loss_fn(params, t, target):
+        prediction = forward(params, t)
+        diff = prediction - target
+        # Loss is sum of squared absolute differences
+        # |z|^2 = Re(z)^2 + Im(z)^2
+        return jnp.mean(jnp.abs(diff)**2)
+
+    # 4. Setup Optimizer
+    optimizer = optax.adam(learning_rate)
+    opt_state = optimizer.init(params)
+    
+    # 5. Update Step (JIT Compiled)
+    @jax.jit
+    def step(params, opt_state, t, target):
+        loss, grads = jax.value_and_grad(loss_fn)(params, t, target)
+        updates, opt_state = optimizer.update(grads, opt_state)
+        params = optax.apply_updates(params, updates)
+        return params, opt_state, loss
+
+    # 6. Training Loop
+    print(f"Starting fit with {n_modes} modes...")
+    loss_history = []
+    
+    for i in range(epochs):
+        params, opt_state, loss = step(params, opt_state, times, C_target)
+        if i % 1000 == 0:
+            loss_history.append(loss)
+            print(f"Epoch {i}: Loss = {loss:.6e}")
+            
+    print(f"Final Loss: {loss:.6e}")
+    
+    # 7. Extract Final Clean Parameters
+    final_gammas = jax.nn.softplus(params["gamma_real"]) + 1j * params["gamma_imag"]
+    final_weights = params["c_real"] + 1j * params["c_imag"]
+    
+    clean_params = {
+        "gammas": final_gammas,
+        "weights": final_weights
+    }
+    
+    final_prediction = forward(params, times)
+    
+    return clean_params, final_prediction, loss_history
