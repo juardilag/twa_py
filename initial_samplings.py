@@ -1,36 +1,33 @@
 import jax.numpy as jnp
 import jax
 
-def discrete_spin_sampling(
-    key, 
-    n_trajectories : int, 
-    initial_z : int = -1.0):
+def discrete_spin_sampling(key, n_trajectories, initial_direction=jnp.array([0.0, 0.0, 1.0])):
     """
-    Generates N initial spin vectors using Discrete sampling.
-    
-    Args:
-        key: JAX PRNGKey for reproducibility.
-        n_trajectories: Number of trajectories to simulate (N).
-        initial_z: The initial polarization of the spin (-1.0 for Down, +1.0 for Up).
-        
-    Returns:
-        s_init: Array of shape (n_trajectories, 3).
+    Generates N initial spin vectors for TWA.
+    The mean spin points along 'initial_direction', with discrete fluctuations (+/-1)
+    in the two perpendicular axes.
     """
-    # 1. Split the random key to generate independent noise for x and y
     k1, k2 = jax.random.split(key)
     
-    # 2. Sample Transverse Components (Quantum Fluctuations)
-    # We use Bernoulli sampling to get 0 or 1, then map: 0 -> -1, 1 -> +1
-    # Formula: 2 * (0 or 1) - 1 = (-1 or +1)
-    sx = 2.0 * jax.random.bernoulli(k1, p=0.5, shape=(n_trajectories,)).astype(jnp.float32) - 1.0
-    sy = 2.0 * jax.random.bernoulli(k2, p=0.5, shape=(n_trajectories,)).astype(jnp.float32) - 1.0
+    # 1. Ensure initial_direction is a unit vector
+    mean_vec = initial_direction / jnp.linalg.norm(initial_direction)
     
-    # 3. Set Longitudinal Component (Mean Field value)
-    # This is fixed for all trajectories (no fluctuations in the eigenbasis)
-    sz = jnp.full((n_trajectories,), initial_z)
+    # 2. Find two perpendicular vectors (Gram-Schmidt style)
+    # We pick an arbitrary vector 'v' to start the process
+    v = jnp.array([1.0, 0.0, 0.0]) if jnp.abs(mean_vec[0]) < 0.9 else jnp.array([0.0, 1.0, 0.0])
+    perp1 = jnp.cross(mean_vec, v)
+    perp1 = perp1 / jnp.linalg.norm(perp1)
+    perp2 = jnp.cross(mean_vec, perp1)
     
-    # 4. Stack into a single matrix (N, 3)
-    s_init = jnp.stack([sx, sy, sz], axis=1)
+    # 3. Sample discrete fluctuations +/- 1 for the two perpendicular directions
+    f1 = 2.0 * jax.random.bernoulli(k1, p=0.5, shape=(n_trajectories,)) - 1.0
+    f2 = 2.0 * jax.random.bernoulli(k2, p=0.5, shape=(n_trajectories,)) - 1.0
+    
+    # 4. Construct S(0) = Mean + Fluctuation1*perp1 + Fluctuation2*perp2
+    # This ensures <S(0)> = initial_direction
+    s_init = (jnp.outer(jnp.ones(n_trajectories), mean_vec) + 
+              jnp.outer(f1, perp1) + 
+              jnp.outer(f2, perp2))
     
     return s_init
 
