@@ -118,3 +118,43 @@ def n_markovian_step(state, step_idx, noise_traj, gamma_kernel, B_field, g, dt):
     return state.at[step_idx].set(S_next), S_next
 
 
+@jax.jit
+def run_twa_bundle(keys, t_grid, eta, omega_c, s, kBT, B_field, g, initial_z):
+    dt = t_grid[1] - t_grid[0]
+    n_trajectories = keys.shape[0]
+    num_steps = t_grid.shape[0]
+    
+    # 1. Pre-compute Kernel
+    # Use the compute_memory_kernel function from our previous discussion
+    tau_grid = jnp.linspace(0, t_grid[-1], num_steps)
+    gamma_kernel = compute_memory_kernel(tau_grid, eta, omega_c, s, g)
+    
+    # 2. Sample Initial Conditions and Noise
+    s_inits = discrete_spin_sampling(keys[0], n_trajectories, initial_z)
+    
+    # Generate unique noise for each trajectory
+    # noises shape: (n_trajectories, num_steps, 3)
+    noises = jax.vmap(generate_noise, in_axes=(0, None, None, None, None, None))(
+        keys, t_grid, eta, omega_c, s, kBT
+    )
+
+    def solve_single_trajectory(s0, single_noise):
+        # Initialize history buffer for one trajectory
+        history_init = jnp.zeros((num_steps, 3)).at[0].set(s0)
+        
+        # Scan over time
+        body_func = lambda state, idx: n_markovian_step(
+            state, idx, t_grid, single_noise, gamma_kernel, B_field, g, dt
+        )
+        final_history, _ = jax.lax.scan(body_func, history_init, jnp.arange(1, num_steps))
+        return final_history
+
+    # Vmap the solver over the batch
+    # Result: (n_trajectories, num_steps, 3)
+    all_trajectories = jax.vmap(solve_single_trajectory)(s_inits, noises)
+    
+    # 3. Calculate Observables (Averages)
+    # <S(t)> = (1/N) * sum_j S_j(t)
+    mean_S = jnp.mean(all_trajectories, axis=0)
+    
+    return mean_S
