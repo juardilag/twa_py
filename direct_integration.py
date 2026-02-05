@@ -1,6 +1,7 @@
 import jax.numpy as jnp
 from jax import vmap
 import jax
+from initial_samplings import discrete_spin_sampling
 
 def get_spectral_density(omega, eta, omega_c, s):
     # J(omega) = eta * omega^s * omega_c^(1-s) * exp(-omega/omega_c)
@@ -71,3 +72,49 @@ def generate_noise(key, t_grid, eta, omega_c, s, kBT, num_omega=1000):
             sin_term @ (amplitude[:, None] * B_stoch))
     
     return xi_t
+
+
+def n_markovian_step(state, step_idx, noise_traj, gamma_kernel, B_field, g, dt):
+    """
+    JAX-compatible step using masking to avoid dynamic slicing errors.
+    """
+    # 1. Get current spin
+    S_t = state[step_idx - 1]
+    
+    # 2. Compute Memory Integral using a Mask
+    # Create a mask that is 1.0 for indices < step_idx and 0.0 otherwise
+    # This keeps the array size static for JIT
+    num_steps = state.shape[0]
+    mask = (jnp.arange(num_steps) < step_idx).astype(jnp.float32)
+    
+    # Compute the full convolution kernel shifted to the current time
+    # We use jnp.roll to align gamma(t - t') with S(t')
+    # Or more simply: use the mask on a reversed kernel
+    relevant_kernel = jnp.roll(gamma_kernel[::-1], step_idx)
+    
+    # Weighted sum over the WHOLE buffer, but mask out the 'future'
+    memory_val = jnp.sum(
+        (relevant_kernel[:, None] * state) * mask[:, None], 
+        axis=0
+    ) * dt
+    
+    # 3. Effective Field
+    xi_t = noise_traj[step_idx - 1]
+    total_field = B_field + xi_t + (g**2) * memory_val [cite: 54]
+    
+    # 4. Evolution (Heun Step)
+    dSdt_1 = jnp.cross(S_t, total_field)
+    S_inter = S_t + dSdt_1 * dt
+    
+    xi_next = noise_traj[step_idx]
+    total_field_next = B_field + xi_next + (g**2) * memory_val 
+    dSdt_2 = jnp.cross(S_inter, total_field_next)
+    
+    S_next = S_t + 0.5 * (dSdt_1 + dSdt_2) * dt
+    
+    # 5. Normalization to preserve spin magnitude
+    S_next = S_next / jnp.linalg.norm(S_next)
+    
+    return state.at[step_idx].set(S_next), S_next
+
+
