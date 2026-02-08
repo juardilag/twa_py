@@ -63,38 +63,39 @@ def boson_sampling(key, n_trajectories, initial_alpha=0.0):
     
     return a_init
 
-def discrete_spin_sampling_single(key, initial_direction, width_scale=0.0):
+def discrete_spin_sampling_single(key, target_vector, width_scale=None):
     """
-    Samples discrete spins for TWA.
-    
-    CRITICAL CHANGE: This function does NOT normalize the output vector.
-    - If width_scale=0.0 (Mean Field): Returns vector of length 1.0.
-    - If width_scale=1.0 (Full TWA): Returns vector of length sqrt(3).
-      This preserves the component values (+/- 1) to ensure correct 
-      Rabi frequencies in non-Markovian models.
+    Generates a SINGLE initial state for DTWA.
+    CRITICAL: Returns vectors of length sqrt(3), NOT length 1.
     """
-    k1, k2 = jax.random.split(key)
+    # 1. Get orientation from target (e.g., [0.707, 0, 0.707])
+    target = jnp.array(target_vector)
+    # We only use this to find angles, so normalizing HERE is fine/required for geometry
+    n = target / (jnp.linalg.norm(target) + 1e-12)
     
-    # 1. Normalize the Mean Vector (The "Center" of your blob)
-    # This ensures the 'mean' part is strictly length 1.0
-    mean_vec = initial_direction / (jnp.linalg.norm(initial_direction) + 1e-12)
+    theta = jnp.arccos(n[2])
+    phi = jnp.arctan2(n[1], n[0])
     
-    # 2. Gram-Schmidt for perpendicular directions
-    is_y_aligned = jnp.abs(mean_vec[1]) > 0.9
-    ref_vec = jnp.where(is_y_aligned, jnp.array([1.0, 0.0, 0.0]), jnp.array([0.0, 1.0, 0.0]))
-    perp1 = jnp.cross(mean_vec, ref_vec)
-    perp1 = perp1 / (jnp.linalg.norm(perp1) + 1e-12)
-    perp2 = jnp.cross(mean_vec, perp1)
+    # 2. Generate Local Fluctuations
+    # Vector S_local = [ +/-1, +/-1, 1 ]
+    # Length is sqrt(3)
+    key_x, key_y = jax.random.split(key)
     
-    # 3. Discrete Fluctuations (+/- 1)
-    # When width_scale=1.0, these are exactly +1 or -1
-    f1 = width_scale * (2.0 * jax.random.bernoulli(k1, p=0.5) - 1.0)
-    f2 = width_scale * (2.0 * jax.random.bernoulli(k2, p=0.5) - 1.0)
+    s_x_local = jax.random.choice(key_x, jnp.array([-1.0, 1.0]))
+    s_y_local = jax.random.choice(key_y, jnp.array([-1.0, 1.0]))
+    s_z_local = 1.0 
     
-    # 4. Construct the Vector
-    # This places the spin on the "corners of a cube" rather than a sphere.
-    raw_vec = mean_vec + f1 * perp1 + f2 * perp2
+    s_local = jnp.array([s_x_local, s_y_local, s_z_local])
     
-    # 5. RETURN WITHOUT NORMALIZATION
-    # We return the "long" vector to preserve the correct eigenvalues (+/- 1).
-    return raw_vec
+    # 3. Rotate
+    ct, st = jnp.cos(theta), jnp.sin(theta)
+    cp, sp = jnp.cos(phi), jnp.sin(phi)
+    
+    Ry = jnp.array([[ct, 0, st], [0, 1, 0], [-st, 0, ct]])
+    Rz = jnp.array([[cp, -sp, 0], [sp, cp, 0], [0, 0, 1]])
+    R = Rz @ Ry
+    
+    s_global = R @ s_local
+    
+    # CRITICAL: Do NOT normalize s_global. Return it with length sqrt(3).
+    return s_global
