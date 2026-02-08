@@ -2,7 +2,7 @@ import jax.numpy as jnp
 from jax import vmap
 import jax
 from initial_samplings import discrete_spin_sampling_single
-from jax.scipy.special import gamma
+from tqdm.auto import tqdm
 
 def get_spectral_density(omega, eta, omega_c, s):
     # J(omega) = eta * omega^s * omega_c^(1-s) * exp(-omega/omega_c)
@@ -13,11 +13,9 @@ def get_spectral_density(omega, eta, omega_c, s):
     
     return jnp.where(omega > 0, J_val, 0.0)
 
-
 def get_A_omega(omega, eta, omega_c, s):
     """Spectral function A(omega) = 2 * J(omega) for positive omega."""
     return 2.0 * get_spectral_density(omega, eta, omega_c, s)
-
 
 def compute_memory_kernel(tau_grid, eta, omega_c, s, g=1.0, num_omega=10_000):
     omega_max = 50*omega_c
@@ -75,23 +73,6 @@ def generate_noise(key, t_grid, eta, omega_c, s, kBT, g=1.0, num_omega=2000):
             
     return xi_t
 
-def compute_reorganization_shift_numerical(omega_grid, A_vals):
-    """
-    Calculates the Reorganization Energy (Polaron Shift) numerically.
-    This is the 'fast' part of the bath response that acts instantaneously.
-    
-    Formula: Shift = Integral[ A(w) / (2*pi*w) * dw ]
-    This is valid for ANY spectral density A(w).
-    """
-    # Avoid division by zero at w=0
-    safe_omega = jnp.maximum(omega_grid, 1e-12)
-    
-    integrand = A_vals / (2.0 * jnp.pi * safe_omega)
-    
-    # Simple trapezoidal integration
-    shift = jnp.trapezoid(integrand, x=omega_grid)
-    return shift
-
 @jax.jit
 def n_markovian_step(state, step_idx, noise_traj, gamma_kernel, B_field, dt, coupling_type="z"):
     S_t = state[step_idx - 1]
@@ -130,27 +111,22 @@ def n_markovian_step(state, step_idx, noise_traj, gamma_kernel, B_field, dt, cou
     new_state = state.at[step_idx].set(S_next_renorm)
     return new_state, new_state[step_idx]
 
-
-def run_twa_bundle(keys, t_grid, eta, omega_c, s, kBT, B_field, g, initial_direction, width_scale, substeps=10, batch_size=100):
+def run_twa_bundle(keys, t_grid, eta, omega_c, s, kBT, B_field, g, initial_direction, width_scale, batch_size=100):
     """
-    substeps: Factor to decrease dt. If dt=0.1 and substeps=10, simulation runs at dt=0.01.
-    batch_size: Number of trajectories to simulate at once to avoid OOM.
+    Runs TWA with:
+    1. Substeps (Fine grid) to capture Super-Ohmic physics.
+    2. Batching to prevent Memory Errors (OOM).
+    3. Progress Bar to track execution.
     """
     # 1. Setup Fine Grid
-    dt_coarse = t_grid[1] - t_grid[0]
-    dt_fine = dt_coarse / substeps
+    dt= t_grid[1] - t_grid[0]
     
     num_steps_coarse = t_grid.shape[0]
-    num_steps_fine = num_steps_coarse * substeps
-    
-    # Create the fine time grid for the internal solver
-    t_grid_fine = jnp.linspace(0, t_grid[-1], num_steps_fine)
-    
+
     # 2. Pre-compute Kernel on FINE grid (Shared by all batches)
-    gamma_kernel_fine = compute_memory_kernel(t_grid_fine, eta, omega_c, s, g)
+    gamma_kernel_fine = compute_memory_kernel(t_grid, eta, omega_c, s, g)
     
     # 3. Define the Batch Processor (JIT compiled for speed)
-    # This function handles creation -> simulation -> aggregation for ONE batch
     @jax.jit
     def process_batch(batch_keys):
         # A. Key Splitting
@@ -158,17 +134,17 @@ def run_twa_bundle(keys, t_grid, eta, omega_c, s, kBT, B_field, g, initial_direc
         sampling_keys = split_keys[:, 0, :]
         noise_keys = split_keys[:, 1, :]
         
-        # B. Sample Initial Conditions (Batch only)
+        # B. Sample Initial Conditions
         s_inits = jax.vmap(discrete_spin_sampling_single, in_axes=(0, None, None))(
             sampling_keys, initial_direction, width_scale
         )
         
-        # C. Generate Noise on FINE grid (Batch only - Saves Memory!)
+        # C. Generate Noise on FINE grid
         noises_fine = jax.vmap(generate_noise, in_axes=(0, None, None, None, None, None, None))(
-            noise_keys, t_grid_fine, eta, omega_c, s, kBT, g
+            noise_keys, t_grid, eta, omega_c, s, kBT, g
         )
         
-        # D. Solver Logic (Same as before)
+        # D. Solver Logic
         def solve_single_trajectory(s0, single_noise):
             num_fine = single_noise.shape[0]
             # Initialize history array for the FINE grid
@@ -176,13 +152,13 @@ def run_twa_bundle(keys, t_grid, eta, omega_c, s, kBT, B_field, g, initial_direc
             
             def scan_body(carry, idx):
                 # Use the fine dt and fine kernel
-                return n_markovian_step(carry, idx, single_noise, gamma_kernel_fine, B_field, dt_fine)
+                return n_markovian_step(carry, idx, single_noise, gamma_kernel_fine, B_field, dt)
 
             # Run scan
-            final_state_array_fine, _ = jax.lax.scan(scan_body, history_init, jnp.arange(1, num_fine))
+            final_state_array, _ = jax.lax.scan(scan_body, history_init, jnp.arange(1, num_fine))
             
             # Downsample to match coarse grid
-            return final_state_array_fine[::substeps]
+            return final_state_array
 
         # E. Run Solver for Batch
         batch_trajectories = jax.vmap(solve_single_trajectory)(s_inits, noises_fine)
@@ -190,13 +166,16 @@ def run_twa_bundle(keys, t_grid, eta, omega_c, s, kBT, B_field, g, initial_direc
         # F. Return Sum (we average later to save memory)
         return jnp.sum(batch_trajectories, axis=0)
 
-    # 4. Batch Loop (Python loop to manage memory)
+    # 4. Batch Loop with Progress Bar
     n_trajs = keys.shape[0]
     total_sum = jnp.zeros((num_steps_coarse, 3))
     
-    # Iterate in chunks
-    for i in range(0, n_trajs, batch_size):
+    # Calculate number of batches for the progress bar
+    # We iterate over the starting index 'i'
+    # tqdm wrapper goes here:
+    for i in tqdm(range(0, n_trajs, batch_size), desc="Simulating TWA Batches"):
         # Slice keys for current batch
+        # Handle the last batch (which might be smaller than batch_size)
         batch_keys = keys[i : i + batch_size]
         
         # Run batch (JIT compiled)
