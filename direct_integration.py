@@ -1,7 +1,7 @@
 import jax.numpy as jnp
 from jax import vmap
 import jax
-from initial_samplings import discrete_spin_sampling_single
+from initial_samplings import discrete_spin_sampling_single, discrete_spin_sampling_factorized
 from tqdm.auto import tqdm
 
 def get_spectral_density(omega, eta, omega_c, s):
@@ -77,34 +77,39 @@ def generate_noise(key, t_grid, eta, omega_c, s, kBT, g=1.0, num_omega=2000):
 def n_markovian_step(state, step_idx, noise_traj, gamma_kernel, B_field, dt, coupling_type="z"):
     S_t = state[step_idx - 1]
     
-    # --- Memory Calculation ---
+    # --- 1. History Convolution (Past) ---
+    # Sums K(dt) ... K(t_current)
+    # This misses K(0)
     indices = jnp.arange(state.shape[0])
     past_mask = (indices < step_idx)
     k_indices = (step_idx - indices)
     
-    # Gather kernel values (History convolution)
     current_gamma = jnp.where(past_mask[:, None], gamma_kernel[k_indices][:, None], 0.0)
-    memory_val = jnp.sum(current_gamma * state, axis=0) * dt
+    memory_history = jnp.sum(current_gamma * state, axis=0) * dt
     
-    # --- Noise & Field ---
+    # --- 2. Instantaneous Correction (THE FIX) ---
+    # Explicitly include the self-interaction term K(0)*S(t)
+    # This captures the "Spike" of the Super-Ohmic bath
+    memory_instant = gamma_kernel[0] * S_t * dt
+    
+    # Total Memory
+    memory_val = memory_history + memory_instant
+    
+    # --- 3. Noise & Field ---
     xi_t = noise_traj[step_idx - 1] 
     
+    # Coupling along Z
+    eff_field_contrib = xi_t + memory_val
     if coupling_type == "z":
-        # Noise and Memory act along Z
-        # Note: If noise_traj is 3D, we pick index 2. If 1D, just use xi_t.
-        # Assuming your generator returns (N, 3), we use xi_t[2].
-        eff_field_contrib = jnp.array([0.0, 0.0, xi_t[2] + memory_val[2]])
-    else:
-        eff_field_contrib = xi_t + memory_val
+         eff_field_contrib = jnp.array([0.0, 0.0, eff_field_contrib[2]])
 
     effective_field = B_field + eff_field_contrib
     
-    # --- Integration (Euler) ---
+    # --- 4. Integration ---
     dSdt = jnp.cross(S_t, effective_field)
     S_next = S_t + dSdt * dt
     
-    # --- Normalization (CRITICAL FIX) ---
-    # Preserves the TWA length (sqrt(3))
+    # --- 5. Normalization (Preserve TWA Length sqrt(3)) ---
     target_norm = jnp.linalg.norm(S_t)
     S_next_renorm = S_next / (jnp.linalg.norm(S_next) + 1e-12) * target_norm
     
@@ -135,7 +140,7 @@ def run_twa_bundle(keys, t_grid, eta, omega_c, s, kBT, B_field, g, initial_direc
         noise_keys = split_keys[:, 1, :]
         
         # B. Sample Initial Conditions
-        s_inits = jax.vmap(discrete_spin_sampling_single, in_axes=(0, None, None))(
+        s_inits = jax.vmap(discrete_spin_sampling_factorized, in_axes=(0, None, None))(
             sampling_keys, initial_direction, width_scale
         )
         
