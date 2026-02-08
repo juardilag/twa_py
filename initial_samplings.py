@@ -31,7 +31,6 @@ def discrete_spin_sampling(key, n_trajectories, initial_direction=jnp.array([0.0
     
     return s_init
 
-
 def boson_sampling(key, n_trajectories, initial_alpha=0.0):
     """
     Generates N initial boson states (complex scalars) using Gaussian Wigner sampling.
@@ -63,3 +62,39 @@ def boson_sampling(key, n_trajectories, initial_alpha=0.0):
     a_init = initial_alpha + noise
     
     return a_init
+
+def discrete_spin_sampling_single(key, initial_direction, width_scale=0.0):
+    """
+    Samples discrete spins for TWA.
+    
+    CRITICAL CHANGE: This function does NOT normalize the output vector.
+    - If width_scale=0.0 (Mean Field): Returns vector of length 1.0.
+    - If width_scale=1.0 (Full TWA): Returns vector of length sqrt(3).
+      This preserves the component values (+/- 1) to ensure correct 
+      Rabi frequencies in non-Markovian models.
+    """
+    k1, k2 = jax.random.split(key)
+    
+    # 1. Normalize the Mean Vector (The "Center" of your blob)
+    # This ensures the 'mean' part is strictly length 1.0
+    mean_vec = initial_direction / (jnp.linalg.norm(initial_direction) + 1e-12)
+    
+    # 2. Gram-Schmidt for perpendicular directions
+    is_y_aligned = jnp.abs(mean_vec[1]) > 0.9
+    ref_vec = jnp.where(is_y_aligned, jnp.array([1.0, 0.0, 0.0]), jnp.array([0.0, 1.0, 0.0]))
+    perp1 = jnp.cross(mean_vec, ref_vec)
+    perp1 = perp1 / (jnp.linalg.norm(perp1) + 1e-12)
+    perp2 = jnp.cross(mean_vec, perp1)
+    
+    # 3. Discrete Fluctuations (+/- 1)
+    # When width_scale=1.0, these are exactly +1 or -1
+    f1 = width_scale * (2.0 * jax.random.bernoulli(k1, p=0.5) - 1.0)
+    f2 = width_scale * (2.0 * jax.random.bernoulli(k2, p=0.5) - 1.0)
+    
+    # 4. Construct the Vector
+    # This places the spin on the "corners of a cube" rather than a sphere.
+    raw_vec = mean_vec + f1 * perp1 + f2 * perp2
+    
+    # 5. RETURN WITHOUT NORMALIZATION
+    # We return the "long" vector to preserve the correct eigenvalues (+/- 1).
+    return raw_vec
