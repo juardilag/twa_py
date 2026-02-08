@@ -1,7 +1,8 @@
 import jax.numpy as jnp
 from jax import vmap
 import jax
-from initial_samplings import discrete_spin_sampling
+from initial_samplings import discrete_spin_sampling_single
+from jax.scipy.special import gamma
 
 def get_spectral_density(omega, eta, omega_c, s):
     # J(omega) = eta * omega^s * omega_c^(1-s) * exp(-omega/omega_c)
@@ -19,142 +20,155 @@ def get_A_omega(omega, eta, omega_c, s):
 
 
 def compute_memory_kernel(tau_grid, eta, omega_c, s, g=1.0, num_omega=10_000):
-    """
-    Computes gamma(tau) = g^2 * integral(A(omega)/pi * sin(omega*tau) d_omega)
-    """
-    # Define an integration grid for omega
-    # We go up to 10*omega_c to ensure the exponential cutoff has acted
-    omega_max = 100*omega_c
-    omega_grid = jnp.linspace(0, omega_max, num_omega)
-    d_omega = omega_grid[1] - omega_grid[0]
-    
+    omega_max = 10 * omega_c
+    omega_grid = jnp.linspace(1e-1, omega_max, num_omega)
     A_vals = get_A_omega(omega_grid, eta, omega_c, s)
     
     def single_tau_kernel(t):
-        # The integral from your notes
         integrand = (A_vals / jnp.pi) * jnp.sin(omega_grid * t)
-        return g**2 * jnp.sum(integrand)*d_omega
+        return g**2 * jnp.trapezoid(integrand, x=omega_grid)
 
-    # Vmap over the time grid to get the kernel series
     return vmap(single_tau_kernel)(tau_grid)
 
 
-def generate_noise(key, t_grid, eta, omega_c, s, kBT, num_omega=1000):
-    """
-    Generates a time-series of noise xi(t) for a single trajectory.
-    """
-    # 1. Setup frequency grid for the bath
+def generate_noise(key, t_grid, eta, omega_c, s, kBT, g=1.0, num_omega=2000):
+    omega_min = 1e-1  
     omega_max = 10.0 * omega_c
-    omega_grid = jnp.linspace(0.01, omega_max, num_omega) # Avoid omega=0
+    
+    omega_grid = jnp.linspace(omega_min, omega_max, num_omega)
     d_omega = omega_grid[1] - omega_grid[0]
     
-    # 2. Get Spectral Function A(omega)
-    # A(omega) = 2 * eta * omega^s * omega_c^(1-s) * exp(-omega/omega_c)
-    A_omega = 2.0 * eta * omega_grid * jnp.power(omega_grid/omega_c, s-1) * jnp.exp(-omega_grid/omega_c)
+    # 1. Spectral Function A(w) = 2 * J(w)
+    safe_omega = jnp.maximum(omega_grid, 1e-12)
+    A_omega = 2.0 * eta * safe_omega * jnp.power(safe_omega / omega_c, s - 1) * jnp.exp(-safe_omega / omega_c)
     
-    # 3. Sample Stochastic Processes (Initial Conditions)
+    # 2. Quantum Thermal Factor (coth)
+    # coth(x) = 1/tanh(x). x = beta * w / 2
+    x = safe_omega / (2.0 * kBT)
+    thermal_factor = 1.0 / jnp.tanh(x)
+    
+    # The FDT states S_xi(w) = J(w) * coth(beta*w/2).
+    # Since A(w) = 2*J(w), we have S_xi(w) = A(w)/2 * coth.
+    # Total variance = Integral[ S_xi(w) * dw/pi ].
+    variance_density = (A_omega * thermal_factor) / (2.0 * jnp.pi)
+    
+    # Amplitude for discrete sum: sqrt(2 * Variance_Density * d_omega) ?? 
+    # Standard synthesis: xi(t) = Sum [ sqrt(S(w) * dw / pi) * (A cos + B sin) ] ?
+    # Let's stick to the density definition: Integral (S(w)/pi) dw
+    # amplitude * amplitude ~ S(w)/pi * dw
+    amplitude = g * jnp.sqrt(variance_density * d_omega) 
+    
+    # 4. Stochastic Sampling
     key_a, key_b = jax.random.split(key)
-    # 3 components for the vector noise (x, y, z)
     A_stoch = jax.random.normal(key_a, (num_omega, 3)) 
     B_stoch = jax.random.normal(key_b, (num_omega, 3))
     
-    # 4. Amplitude weighting from your notes: sqrt( (kBT * A(omega) * d_omega) / (pi * omega^2) )
-    amplitude = jnp.sqrt((kBT * A_omega * d_omega) / (jnp.pi * omega_grid**2))
+    # Use simple broadcasting for time synthesis
+    # shape: (num_steps, num_omega)
+    cos_term = jnp.cos(jnp.outer(t_grid, omega_grid))
+    sin_term = jnp.sin(jnp.outer(t_grid, omega_grid))
     
-    # 5. Construct xi(t) for all t in t_grid
-    # We use broadcasting to compute (num_t, num_omega)
-    cos_term = jnp.cos(jnp.outer(t_grid, omega_grid)) # (T, W)
-    sin_term = jnp.sin(jnp.outer(t_grid, omega_grid)) # (T, W)
-    
-    # xi_t = sum_w amplitude * (A_stoch * cos + B_stoch * sin)
-    # Final shape: (num_t, 3)
+    # Sum over frequencies (axis 1)
+    # (Steps, Freqs) @ (Freqs, 3) -> (Steps, 3)
     xi_t = (cos_term @ (amplitude[:, None] * A_stoch) + 
             sin_term @ (amplitude[:, None] * B_stoch))
-    
+            
     return xi_t
 
-
-def n_markovian_step(state, step_idx, noise_traj, gamma_kernel, B_field, g, dt):
-    """
-    JAX-compatible step using masking to avoid dynamic slicing errors.
-    """
-    # 1. Get current spin
+@jax.jit
+def n_markovian_step(state, step_idx, noise_traj, gamma_kernel, B_field, dt, coupling_type="z"):
     S_t = state[step_idx - 1]
     
-    # 2. Compute Memory Integral using a Mask
-    # Create a mask that is 1.0 for indices < step_idx and 0.0 otherwise
-    # This keeps the array size static for JIT
-    num_steps = state.shape[0]
-    mask = (jnp.arange(num_steps) < step_idx).astype(jnp.float32)
+    # We need Sum_{j=0}^{step-1} gamma(t_{step} - t_j) * S(t_j) * dt
+    # t_{step} - t_j corresponds to index (step - j) in the kernel array
     
-    # Compute the full convolution kernel shifted to the current time
-    # We use jnp.roll to align gamma(t - t') with S(t')
-    # Or more simply: use the mask on a reversed kernel
-    relevant_kernel = jnp.roll(gamma_kernel[::-1], step_idx)
+    # Dynamic slicing to get the relevant history S[0:step_idx]
+    # and the relevant kernel gamma[step_idx:0:-1]
+    # For JAX efficiency, we can stick to masked summation if N is not huge (<5000)
     
-    # Weighted sum over the WHOLE buffer, but mask out the 'future'
-    memory_val = jnp.sum(
-        (relevant_kernel[:, None] * state) * mask[:, None], 
-        axis=0
-    ) * dt
+    # Create indices [0, 1, ..., N-1]
+    indices = jnp.arange(state.shape[0])
     
-    # 3. Effective Field
-    xi_t = noise_traj[step_idx - 1]
-    total_field = B_field + xi_t + (g**2) * memory_val [cite: 54]
+    # Mask for past (j < step_idx)
+    past_mask = (indices < step_idx)
     
-    # 4. Evolution (Heun Step)
-    dSdt_1 = jnp.cross(S_t, total_field)
-    S_inter = S_t + dSdt_1 * dt
+    # Kernel indices: we need gamma[step_idx - j]
+    # We use jnp.abs or clip to ensure valid indices, though mask handles the rest
+    k_indices = (step_idx - indices)
     
-    xi_next = noise_traj[step_idx]
-    total_field_next = B_field + xi_next + (g**2) * memory_val 
-    dSdt_2 = jnp.cross(S_inter, total_field_next)
+    # Gather relevant kernel values (0 where mask is false)
+    # Using jnp.take or simple indexing. 
+    # Note: gamma_kernel[0] is usually 0 or finite. gamma_kernel[step_idx] is time t.
+    current_gamma = jnp.where(past_mask[:, None], gamma_kernel[k_indices][:, None], 0.0)
     
-    S_next = S_t + 0.5 * (dSdt_1 + dSdt_2) * dt
+    # Convolve
+    memory_val = jnp.sum(current_gamma * state, axis=0) * dt
     
-    # 5. Normalization to preserve spin magnitude
-    S_next = S_next / jnp.linalg.norm(S_next)
+    # Noise at current time
+    xi_t = noise_traj[step_idx - 1] 
     
-    return state.at[step_idx].set(S_next), S_next
+    # Selection of Coupling Axis
+    if coupling_type == "z":
+        # Noise/Memory along Z, but Torque = S x (B_z + ...)
+        eff_field_contrib = jnp.array([0.0, 0.0, xi_t[2] + memory_val[2]])
+    else:
+        eff_field_contrib = xi_t + memory_val
+
+    effective_field = B_field + eff_field_contrib
+    
+    dSdt = jnp.cross(S_t, effective_field)
+    S_next = S_t + dSdt * dt
+    
+    # Normalize
+    new_state = state.at[step_idx].set(S_next / (jnp.linalg.norm(S_next) + 1e-12))
+    return new_state, new_state[step_idx]
 
 
-@jax.jit
-def run_twa_bundle(keys, t_grid, eta, omega_c, s, kBT, B_field, g, initial_z):
+def run_twa_bundle(keys, t_grid, eta, omega_c, s, kBT, B_field, g, initial_direction, width_scale):
     dt = t_grid[1] - t_grid[0]
-    n_trajectories = keys.shape[0]
+    n_trajs = keys.shape[0]
     num_steps = t_grid.shape[0]
     
     # 1. Pre-compute Kernel
-    # Use the compute_memory_kernel function from our previous discussion
     tau_grid = jnp.linspace(0, t_grid[-1], num_steps)
     gamma_kernel = compute_memory_kernel(tau_grid, eta, omega_c, s, g)
     
-    # 2. Sample Initial Conditions and Noise
-    s_inits = discrete_spin_sampling(keys[0], n_trajectories, initial_z)
+    # 2. Key Management: Corrected Unpacking
+    # Split each key and move the '2' to the front for unpacking
+    split_keys = jax.vmap(jax.random.split)(keys)  # (N, 2, 2)
+    sampling_keys = split_keys[:, 0, :]           # (N, 2)
+    noise_keys = split_keys[:, 1, :]              # (N, 2)
+
+    # 3. Vmap the sampler (now sampling_keys has the correct shape)
+    s_inits = jax.vmap(discrete_spin_sampling_single, in_axes=(0, None, None))(
+        sampling_keys, initial_direction, width_scale
+    )
     
-    # Generate unique noise for each trajectory
-    # noises shape: (n_trajectories, num_steps, 3)
-    noises = jax.vmap(generate_noise, in_axes=(0, None, None, None, None, None))(
-        keys, t_grid, eta, omega_c, s, kBT
+    # 4. Parallelize noise generation
+    # Each trajectory now evolves under unique noise
+    noises = jax.vmap(generate_noise, in_axes=(0, None, None, None, None, None, None))(
+        noise_keys, t_grid, eta, omega_c, s, kBT, g
     )
 
     def solve_single_trajectory(s0, single_noise):
-        # Initialize history buffer for one trajectory
+        num_steps = single_noise.shape[0]
+        # Initialize history with the starting spin [cite: 42]
         history_init = jnp.zeros((num_steps, 3)).at[0].set(s0)
         
-        # Scan over time
-        body_func = lambda state, idx: n_markovian_step(
-            state, idx, t_grid, single_noise, gamma_kernel, B_field, g, dt
-        )
-        final_history, _ = jax.lax.scan(body_func, history_init, jnp.arange(1, num_steps))
-        return final_history
+        # Define the scan body
+        def scan_body(carry, idx):
+            # n_markovian_step now returns (new_carry, step_output)
+            return n_markovian_step(carry, idx, single_noise, gamma_kernel, B_field, dt)
 
-    # Vmap the solver over the batch
-    # Result: (n_trajectories, num_steps, 3)
+        # Carry is the full 'state' array being updated
+        # Trajectory is the 'S_next' gathered at each step
+        final_state_array, trajectory = jax.lax.scan(scan_body, history_init, jnp.arange(1, num_steps))
+        
+        # We return the full array which includes the initial s0 at index 0
+        return final_state_array
+
+    # 5. Parallelize the ODE solver
     all_trajectories = jax.vmap(solve_single_trajectory)(s_inits, noises)
     
-    # 3. Calculate Observables (Averages)
-    # <S(t)> = (1/N) * sum_j S_j(t)
-    mean_S = jnp.mean(all_trajectories, axis=0)
-    
-    return mean_S
+    # Average over trajectories
+    return jnp.mean(all_trajectories, axis=0)
