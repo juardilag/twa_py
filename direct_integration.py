@@ -20,7 +20,7 @@ def get_A_omega(omega, eta, omega_c, s):
 
 
 def compute_memory_kernel(tau_grid, eta, omega_c, s, g=1.0, num_omega=10_000):
-    omega_max = 10 * omega_c
+    omega_max = 50*omega_c
     omega_grid = jnp.linspace(1e-1, omega_max, num_omega)
     A_vals = get_A_omega(omega_grid, eta, omega_c, s)
     
@@ -33,7 +33,7 @@ def compute_memory_kernel(tau_grid, eta, omega_c, s, g=1.0, num_omega=10_000):
 
 def generate_noise(key, t_grid, eta, omega_c, s, kBT, g=1.0, num_omega=2000):
     omega_min = 1e-1  
-    omega_max = 10.0 * omega_c
+    omega_max = 50.0 * omega_c
     
     omega_grid = jnp.linspace(omega_min, omega_max, num_omega)
     d_omega = omega_grid[1] - omega_grid[0]
@@ -79,48 +79,46 @@ def generate_noise(key, t_grid, eta, omega_c, s, kBT, g=1.0, num_omega=2000):
 def n_markovian_step(state, step_idx, noise_traj, gamma_kernel, B_field, dt, coupling_type="z"):
     S_t = state[step_idx - 1]
     
+    # --- Memory Calculation ---
     # We need Sum_{j=0}^{step-1} gamma(t_{step} - t_j) * S(t_j) * dt
-    # t_{step} - t_j corresponds to index (step - j) in the kernel array
-    
-    # Dynamic slicing to get the relevant history S[0:step_idx]
-    # and the relevant kernel gamma[step_idx:0:-1]
-    # For JAX efficiency, we can stick to masked summation if N is not huge (<5000)
-    
-    # Create indices [0, 1, ..., N-1]
     indices = jnp.arange(state.shape[0])
     
     # Mask for past (j < step_idx)
     past_mask = (indices < step_idx)
     
     # Kernel indices: we need gamma[step_idx - j]
-    # We use jnp.abs or clip to ensure valid indices, though mask handles the rest
     k_indices = (step_idx - indices)
     
     # Gather relevant kernel values (0 where mask is false)
-    # Using jnp.take or simple indexing. 
-    # Note: gamma_kernel[0] is usually 0 or finite. gamma_kernel[step_idx] is time t.
     current_gamma = jnp.where(past_mask[:, None], gamma_kernel[k_indices][:, None], 0.0)
     
-    # Convolve
+    # Convolve: Integral approx as sum * dt
     memory_val = jnp.sum(current_gamma * state, axis=0) * dt
     
-    # Noise at current time
+    # --- Noise & Field ---
     xi_t = noise_traj[step_idx - 1] 
     
     # Selection of Coupling Axis
     if coupling_type == "z":
         # Noise/Memory along Z, but Torque = S x (B_z + ...)
+        # Ensure we only take the Z-components of noise and memory
         eff_field_contrib = jnp.array([0.0, 0.0, xi_t[2] + memory_val[2]])
     else:
         eff_field_contrib = xi_t + memory_val
 
     effective_field = B_field + eff_field_contrib
     
+    # --- Integration (Euler) ---
     dSdt = jnp.cross(S_t, effective_field)
     S_next = S_t + dSdt * dt
     
-    # Normalize
-    new_state = state.at[step_idx].set(S_next / (jnp.linalg.norm(S_next) + 1e-12))
+    # --- Normalization (CRITICAL FIX) ---
+    # Instead of normalizing to 1.0, we normalize to the length of the previous state.
+    # This preserves the TWA length (sqrt(3)) set by your sampler.
+    target_norm = jnp.linalg.norm(S_t)
+    S_next_renorm = S_next / (jnp.linalg.norm(S_next) + 1e-12) * target_norm
+    
+    new_state = state.at[step_idx].set(S_next_renorm)
     return new_state, new_state[step_idx]
 
 
