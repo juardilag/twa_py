@@ -106,7 +106,7 @@ def n_markovian_step(state, step_idx, noise_traj, gamma_kernel, B_field, dt, cou
     new_state = state.at[step_idx].set(S_next_renorm)
     return new_state, new_state[step_idx]
 
-def run_twa_bundle(keys, t_grid, eta, omega_c, s, kBT, B_field, g, initial_direction, width_scale, batch_size=100):
+def run_twa_bundle(keys, t_grid, eta, omega_c, s, kBT, B_field, g, initial_direction, batch_size=100):
     # 1. Setup Fine Grid
     dt= t_grid[1] - t_grid[0]
     
@@ -125,7 +125,7 @@ def run_twa_bundle(keys, t_grid, eta, omega_c, s, kBT, B_field, g, initial_direc
         
         # B. Sample Initial Conditions
         s_inits = jax.vmap(discrete_spin_sampling_factorized, in_axes=(0, None, None))(
-            sampling_keys, initial_direction, width_scale
+            sampling_keys, initial_direction
         )
         
         # C. Generate Noise on FINE grid
