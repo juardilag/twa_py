@@ -124,7 +124,7 @@ def run_twa_bundle(keys, t_grid, eta, omega_c, s, kBT, B_field, g, initial_direc
         noise_keys = split_keys[:, 1, :]
         
         # B. Sample Initial Conditions
-        s_inits = jax.vmap(discrete_spin_sampling_factorized, in_axes=(0, None, None))(
+        s_inits = jax.vmap(discrete_spin_sampling_factorized, in_axes=(0, None))(
             sampling_keys, initial_direction
         )
         
