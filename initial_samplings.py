@@ -100,7 +100,7 @@ def discrete_spin_sampling_single(key, target_vector, width_scale=None):
     # CRITICAL: Do NOT normalize s_global. Return it with length sqrt(3).
     return s_global
 
-def discrete_spin_sampling_factorized(key, target_vector, width_scale=None):
+def discrete_spin_sampling_factorized(key, target_vector):
     """
     Samples Sx, Sy, Sz INDEPENDENTLY in the Lab Frame.
     Constrains values to be strictly +1 or -1.
