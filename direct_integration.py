@@ -67,44 +67,97 @@ def generate_noise(key, t_grid, eta, omega_c, s, kBT, g=1.0, num_omega=2000):
             
     return xi_t
 
-@jax.jit
-def n_markovian_step(state, step_idx, noise_traj, gamma_kernel, B_field, dt, coupling_type="z"):
-    S_t = state[step_idx - 1]
+def compute_effective_field(S_state, history_array, step_idx, gamma_kernel, 
+                            noise_traj, B_field, dt, coupling_type="z"):
+    """
+    Computes the total effective magnetic field (External + Memory + Noise).
+    """
+    # A. Memory Convolution
+    # We use the history_array up to the current step_idx
+    indices = jnp.arange(history_array.shape[0])
     
-    # 1. History Convolution (Past) ---
-    indices = jnp.arange(state.shape[0])
+    # Create mask for valid past states
+    # Note: We only care about history < step_idx
     past_mask = (indices < step_idx)
     k_indices = (step_idx - indices)
     
+    # Gather valid gamma values (0 where mask is False)
     current_gamma = jnp.where(past_mask[:, None], gamma_kernel[k_indices][:, None], 0.0)
-    memory_history = jnp.sum(current_gamma * state, axis=0) * dt
     
-    # 2. Instantaneous Correction (THE FIX) ---
-    memory_instant = gamma_kernel[0] * S_t * dt
+    # Convolve
+    memory_history = jnp.sum(current_gamma * history_array, axis=0) * dt
     
-    # Total Memory
+    # Instantaneous memory correction (t - t' = 0 term)
+    memory_instant = gamma_kernel[0] * S_state * dt
+    
     memory_val = memory_history + memory_instant
+
+    # B. Noise
+    # Handle edge case where step_idx might exceed noise array length (though lax.scan usually handles bounds)
+    # We clip the index to be safe.
+    xi_t = noise_traj[jnp.clip(step_idx, 0, noise_traj.shape[0]-1)]
     
-    # 3. Noise & Field
-    xi_t = noise_traj[step_idx - 1] 
-    
-    # Coupling along Z
+    # C. Total Field Construction
     eff_field_contrib = xi_t + memory_val
+    
     if coupling_type == "z":
          eff_field_contrib = jnp.array([0.0, 0.0, eff_field_contrib[2]])
 
-    effective_field = B_field + eff_field_contrib
+    return B_field + eff_field_contrib
+
+# --- 2. The Heun Integrator ---
+@jax.jit
+def heun_step_non_markovian(state_trajectory, step_idx, noise_traj, gamma_kernel, B_field, dt):
+    """
+    Performs a single Heun (Predictor-Corrector) step for Stratonovich SDEs.
+    """
+    # Current time index (n)
+    curr_idx = step_idx - 1
+    # Current state S_n
+    S_curr = state_trajectory[curr_idx]
     
-    # 4. Integration ---
-    dSdt = jnp.cross(S_t, effective_field)
-    S_next = S_t + dSdt * dt
+    # --- STAGE 1: PREDICTOR (Euler) ---
+    # Calculate Field at t_n using current history
+    B_eff_curr = compute_effective_field(
+        S_curr, state_trajectory, curr_idx, 
+        gamma_kernel, noise_traj, B_field, dt
+    )
     
-    # 5. Normalization (Preserve TWA Length sqrt(3)) 
-    target_norm = jnp.linalg.norm(S_t)
+    # Euler Prediction: S~_{n+1}
+    dS_1 = jnp.cross(S_curr, B_eff_curr)
+    S_pred = S_curr + dS_1 * dt
+    
+    # --- STAGE 2: CORRECTOR ---
+    # We must estimate the field at t_{n+1}.
+    # Crucial for Non-Markovian: We need to temporarily "imagine" the history 
+    # includes our prediction S_pred at the next step.
+    
+    # Update trajectory with prediction for the calculation (temporarily)
+    # This allows the convolution to "see" the predicted future state
+    traj_with_pred = state_trajectory.at[step_idx].set(S_pred)
+    
+    # Calculate Field at t_{n+1} using predicted history
+    B_eff_next = compute_effective_field(
+        S_pred, traj_with_pred, step_idx, 
+        gamma_kernel, noise_traj, B_field, dt
+    )
+    
+    # Calculate slope at predicted future
+    dS_2 = jnp.cross(S_pred, B_eff_next)
+    
+    # Heun Update: Average the slopes (Trapezoidal rule)
+    S_next = S_curr + 0.5 * (dS_1 + dS_2) * dt
+    
+    # --- STAGE 3: NORMALIZATION ---
+    # Stratonovich preserves norm, but Heun has small numerical drift O(dt^3).
+    # We re-normalize to stay strictly on the Bloch sphere.
+    target_norm = jnp.linalg.norm(S_curr)
     S_next_renorm = S_next / (jnp.linalg.norm(S_next) + 1e-12) * target_norm
     
-    new_state = state.at[step_idx].set(S_next_renorm)
-    return new_state, new_state[step_idx]
+    # Write final result to state
+    new_state_traj = state_trajectory.at[step_idx].set(S_next_renorm)
+    
+    return new_state_traj, S_next_renorm
 
 def run_twa_bundle(keys, t_grid, eta, omega_c, s, kBT, B_field, g, initial_direction, batch_size=100):
     # 1. Setup Fine Grid
@@ -141,7 +194,7 @@ def run_twa_bundle(keys, t_grid, eta, omega_c, s, kBT, B_field, g, initial_direc
             
             def scan_body(carry, idx):
                 # Use the fine dt and fine kernel
-                return n_markovian_step(carry, idx, single_noise, gamma_kernel_fine, B_field, dt)
+                return heun_step_non_markovian(carry, idx, single_noise, gamma_kernel_fine, B_field, dt)
 
             # Run scan
             final_state_array, _ = jax.lax.scan(scan_body, history_init, jnp.arange(1, num_fine))
