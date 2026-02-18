@@ -25,6 +25,50 @@ def compute_memory_kernel(tau_grid, eta, omega_c, s, g=1.0, num_omega=10_000):
     
     return g**2 * integral
 
+# Noise Generation
+def setup_noise_parameters(t_grid, eta, omega_c, s, kBT, g=1.0, num_omega=2000):
+    omega_max = 50.0 * omega_c
+    omega_grid = jnp.linspace(1e-1, omega_max, num_omega)
+    d_omega = omega_grid[1] - omega_grid[0]
+    
+    # 1. Spectral Amplitude
+    safe_omega = jnp.maximum(omega_grid, 1e-12)
+    J_omega = eta * safe_omega * jnp.power(safe_omega / omega_c, s - 1) * jnp.exp(-safe_omega / omega_c)
+    
+    x = safe_omega / (2.0 * kBT)
+    thermal_factor = 1.0 / jnp.tanh(x)
+    
+    # Amplitude coefficient: g * sqrt( J(w) * coth(...) * dw / pi )
+    # variance_density = (2*J * coth) / (2pi) = J*coth/pi
+    amplitude = g * jnp.sqrt((J_omega * thermal_factor * d_omega) / jnp.pi)
+    
+    # 2. Construct the Evolution Operator Matrix (Time x Freq)
+    # We use the identity: A*cos(wt) + B*sin(wt) = Re[ (A + iB) * e^(-iwt) ]
+    time_evolution = jnp.exp(-1j * jnp.outer(t_grid, omega_grid))
+    transfer_matrix = time_evolution * amplitude[None, :]
+    
+    return transfer_matrix
+
+
+@jax.jit
+def generate_noise_fast(key, transfer_matrix):
+    num_omega = transfer_matrix.shape[1]
+    
+    # Generate Complex Normal Noise: Z = A + iB
+    # A, B ~ N(0, 1)
+    # Standard complex normal has var 1 (0.5 real, 0.5 imag), 
+    # but we want A~N(0,1), B~N(0,1), so we generate standard normal complex 
+    key_a, key_b = jax.random.split(key)
+    
+    noise_A = jax.random.normal(key_a, (num_omega, 3))
+    noise_B = jax.random.normal(key_b, (num_omega, 3))
+    
+    Z_stoch = noise_A + 1j * noise_B
+
+    complex_trajectory = transfer_matrix @ Z_stoch
+    return jnp.real(complex_trajectory)
+
+
 def generate_noise(key, t_grid, eta, omega_c, s, kBT, g=1.0, num_omega=2000):
     omega_min = 1e-1  
     omega_max = 50.0 * omega_c
@@ -63,37 +107,36 @@ def generate_noise(key, t_grid, eta, omega_c, s, kBT, g=1.0, num_omega=2000):
             
     return xi_t
 
+
 def compute_effective_field(S_state, history_array, step_idx, gamma_kernel, 
                             noise_traj, B_field, dt, coupling_type="z"):
-    """
-    Computes the total effective magnetic field (External + Memory + Noise).
-    """
-    # A. Memory Convolution
-    # We use the history_array up to the current step_idx
-    indices = jnp.arange(history_array.shape[0])
+    # 1. Vectorized Memory Convolution
+    N = history_array.shape[0]
+    indices = jnp.arange(N)
     
-    # Create mask for valid past states
-    # Note: We only care about history < step_idx
-    past_mask = (indices < step_idx)
-    k_indices = (step_idx - indices)
+    # Calculate the lag indices: k = step_idx - j
+    # valid lags are k > 0. 
+    # k <= 0 implies current time or future (which should be 0)
+    lag_indices = step_idx - indices
+
+    # Fetch Gamma values. 
+    # mode='fill' ensures that any index < 0 (future) or > len (too old) becomes 0.0
+    # This automatically handles the "causality" mask for the future.
+    gamma_vals = jnp.take(gamma_kernel, lag_indices, mode='fill', fill_value=0.0)
     
-    # Gather valid gamma values (0 where mask is False)
-    current_gamma = jnp.where(past_mask[:, None], gamma_kernel[k_indices][:, None], 0.0)
-    
-    # Convolve
-    memory_history = jnp.sum(current_gamma * history_array, axis=0) * dt
-    
-    # Instantaneous memory correction (t - t' = 0 term)
+    # Explicitly zero out the current time step (lag=0) because it is handled 
+    # separately as 'memory_instant'.
+    # We use 'where' on the 1D array (fast) rather than the 2D array.
+    gamma_causal = jnp.where(lag_indices > 0, gamma_vals, 0.0)
+
+    # Fast Contraction: Vector (N) @ Matrix (N, 3) -> Vector (3)
+    memory_history = jnp.dot(gamma_causal, history_array) * dt
     memory_instant = gamma_kernel[0] * S_state * dt
-    
     memory_val = memory_history + memory_instant
 
-    # B. Noise
-    # Handle edge case where step_idx might exceed noise array length (though lax.scan usually handles bounds)
-    # We clip the index to be safe.
+    # 3. Noise
+    # Safe clipping to ensure we don't crash if index is slightly off
     xi_t = noise_traj[jnp.clip(step_idx, 0, noise_traj.shape[0]-1)]
-    
-    # C. Total Field Construction
     eff_field_contrib = xi_t + memory_val
     
     if coupling_type == "z":
@@ -101,129 +144,116 @@ def compute_effective_field(S_state, history_array, step_idx, gamma_kernel,
 
     return B_field + eff_field_contrib
 
+
 # --- 2. The Heun Integrator ---
 @jax.jit
 def heun_step_non_markovian(state_trajectory, step_idx, noise_traj, gamma_kernel, B_field, dt):
-    """
-    Performs a single Heun (Predictor-Corrector) step for Stratonovich SDEs.
-    """
     # Current time index (n)
     curr_idx = step_idx - 1
-    # Current state S_n
     S_curr = state_trajectory[curr_idx]
     
     # --- STAGE 1: PREDICTOR (Euler) ---
-    # Calculate Field at t_n using current history
+    # Calculate Field at t_n
     B_eff_curr = compute_effective_field(
         S_curr, state_trajectory, curr_idx, 
         gamma_kernel, noise_traj, B_field, dt
     )
     
-    # Euler Prediction: S~_{n+1}
     dS_1 = jnp.cross(S_curr, B_eff_curr)
     S_pred = S_curr + dS_1 * dt
     
     # --- STAGE 2: CORRECTOR ---
-    # We must estimate the field at t_{n+1}.
-    # Crucial for Non-Markovian: We need to temporarily "imagine" the history 
-    # includes our prediction S_pred at the next step.
-    
-    # Update trajectory with prediction for the calculation (temporarily)
-    # This allows the convolution to "see" the predicted future state
+    # Temporarily update history to allow convolution to "see" the future prediction
     traj_with_pred = state_trajectory.at[step_idx].set(S_pred)
     
-    # Calculate Field at t_{n+1} using predicted history
+    # Calculate Field at t_{n+1}
     B_eff_next = compute_effective_field(
         S_pred, traj_with_pred, step_idx, 
         gamma_kernel, noise_traj, B_field, dt
     )
     
-    # Calculate slope at predicted future
     dS_2 = jnp.cross(S_pred, B_eff_next)
     
-    # Heun Update: Average the slopes (Trapezoidal rule)
+    # Heun Update: Average the slopes
     S_next = S_curr + 0.5 * (dS_1 + dS_2) * dt
     
     # --- STAGE 3: NORMALIZATION ---
-    # Stratonovich preserves norm, but Heun has small numerical drift O(dt^3).
-    # We re-normalize to stay strictly on the Bloch sphere.
+    # Crucial for stability in long simulations
     target_norm = jnp.linalg.norm(S_curr)
     S_next_renorm = S_next / (jnp.linalg.norm(S_next) + 1e-12) * target_norm
     
-    # Write final result to state
+    # Write final result
     new_state_traj = state_trajectory.at[step_idx].set(S_next_renorm)
     
     return new_state_traj, S_next_renorm
 
-def run_twa_bundle(keys, t_grid, eta, omega_c, s, kBT, B_field, g, initial_direction, batch_size=100):
-    # 1. Setup Fine Grid
-    dt= t_grid[1] - t_grid[0]
-    
-    num_steps_coarse = t_grid.shape[0]
 
-    # 2. Pre-compute Kernel on FINE grid (Shared by all batches)
+def run_twa_bundle(keys, t_grid, eta, omega_c, s, kBT, B_field, g, initial_direction, batch_size=2000):
+    dt = t_grid[1] - t_grid[0]
+    num_steps = t_grid.shape[0]
+    n_total = keys.shape[0]
+    
+    # 1. Pre-compute Kernel (Analytical is instant)
+    print("1. Computing Memory Kernel...")
+    # Make sure to use the Analytical function from previous turn for speed
     gamma_kernel_fine = compute_memory_kernel(t_grid, eta, omega_c, s, g)
     
-    # 3. Define the Batch Processor (JIT compiled for speed)
-    @jax.jit
-    def process_batch(batch_keys):
-        # A. Key Splitting
-        split_keys = jax.vmap(jax.random.split)(batch_keys)
-        sampling_keys = split_keys[:, 0, :]
-        noise_keys = split_keys[:, 1, :]
-        
-        # B. Sample Initial Conditions
-        s_inits = jax.vmap(discrete_spin_sampling_factorized, in_axes=(0, None))(
-            sampling_keys, initial_direction
-        )
-        
-        # C. Generate Noise on FINE grid
-        noises_fine = jax.vmap(generate_noise, in_axes=(0, None, None, None, None, None, None))(
-            noise_keys, t_grid, eta, omega_c, s, kBT, g
-        )
-        
-        # D. Solver Logic
-        def solve_single_trajectory(s0, single_noise):
-            num_fine = single_noise.shape[0]
-            # Initialize history array for the FINE grid
-            history_init = jnp.zeros((num_fine, 3)).at[0].set(s0)
-            
-            def scan_body(carry, idx):
-                # Use the fine dt and fine kernel
-                return heun_step_non_markovian(carry, idx, single_noise, gamma_kernel_fine, B_field, dt)
-
-            # Run scan
-            final_state_array, _ = jax.lax.scan(scan_body, history_init, jnp.arange(1, num_fine))
-            
-            # Downsample to match coarse grid
-            return final_state_array
-
-        # E. Run Solver for Batch
-        batch_trajectories = jax.vmap(solve_single_trajectory)(s_inits, noises_fine)
-        
-        # F. Return Sum (we average later to save memory)
-        return jnp.sum(batch_trajectories, axis=0)
-
-    # 4. Batch Loop with Progress Bar
-    n_trajs = keys.shape[0]
-    total_sum = jnp.zeros((num_steps_coarse, 3))
+    # 2. Pre-compute Noise Matrix (Shared by all)
+    print("2. Pre-computing Noise Transfer Matrix...")
+    noise_transfer_matrix = setup_noise_parameters(t_grid, eta, omega_c, s, kBT, g)
     
-    # Calculate number of batches for the progress bar
-    # We iterate over the starting index 'i'
-    # tqdm wrapper goes here:
-    for i in tqdm(range(0, n_trajs, batch_size), desc="Simulating TWA Batches"):
-        # Slice keys for current batch
-        # Handle the last batch (which might be smaller than batch_size)
-        batch_keys = keys[i : i + batch_size]
+    # 3. Define the Single Trajectory Solver
+    # This generates noise internally to save VRAM
+    def solve_single_trajectory(key):
+        k_samp, k_noise = jax.random.split(key)
         
-        # Run batch (JIT compiled)
-        batch_sum = process_batch(batch_keys)
+        # A. Sample Initial State
+        s0 = discrete_spin_sampling_factorized(k_samp, initial_direction)
+        
+        # B. Generate Noise (Fast Matrix Multiply)
+        # Note: We generate this JUST for this one trajectory
+        noise_traj = generate_noise_fast(k_noise, noise_transfer_matrix)
+        
+        # C. Initialize History
+        history_init = jnp.zeros((num_steps, 3)).at[0].set(s0)
+        
+        # D. Time Loop (Scan)
+        def scan_body(carry, idx):
+            # carry is the state_trajectory
+            return heun_step_non_markovian(carry, idx, noise_traj, gamma_kernel_fine, B_field, dt)
+
+        final_traj, _ = jax.lax.scan(scan_body, history_init, jnp.arange(1, num_steps))
+        return final_traj
+
+    # 4. Batch Processor
+    # We map the solver over the batch keys and sum immediately
+    @jax.jit
+    def process_batch_sum(batch_keys):
+        batch_trajs = jax.vmap(solve_single_trajectory)(batch_keys)
+        return jnp.sum(batch_trajs, axis=0)
+
+    # 5. Main Loop
+    total_sum = jnp.zeros((num_steps, 3))
+    
+    # Calculate batches
+    n_batches = int(jnp.ceil(n_total / batch_size))
+    
+    print(f"3. Starting Simulation: {n_total} trajectories in {n_batches} batches.")
+    
+    for i in tqdm(range(n_batches), desc="TWA Batches"):
+        start_idx = i * batch_size
+        end_idx = min((i + 1) * batch_size, n_total)
+        
+        current_keys = keys[start_idx:end_idx]
+        
+        # Run optimized batch
+        batch_partial_sum = process_batch_sum(current_keys)
         
         # Accumulate
-        total_sum = total_sum + batch_sum
+        total_sum = total_sum + batch_partial_sum
         
-    # 5. Final Average
-    return total_sum / n_trajs
+    # 6. Final Average
+    return total_sum / n_total
 
 
 def compute_exact_expectation_value(t_grid, initial_state, eta, omega_c, s, kBT, g, num_omega=10000):
