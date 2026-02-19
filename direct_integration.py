@@ -14,7 +14,7 @@ def get_spectral_density(omega, eta, omega_c, s):
 
 # Memory Kernel
 def compute_memory_kernel(tau_grid, eta, omega_c, s, g=1.0, num_omega=10_000):
-    omega_grid = jnp.linspace(1e-3, 50*omega_c, num_omega)
+    omega_grid = jnp.linspace(1e-5, 30*omega_c, num_omega)
     A_vals = 2.0 * get_spectral_density(omega_grid, eta, omega_c, s)
     sin_matrix = jnp.sin(jnp.outer(tau_grid, omega_grid))
 
@@ -24,8 +24,8 @@ def compute_memory_kernel(tau_grid, eta, omega_c, s, g=1.0, num_omega=10_000):
     return g**2 * integral
 
 # Noise Generation
-def setup_noise_parameters(t_grid, eta, omega_c, s, kBT, g=1.0, num_omega=2000):
-    omega_grid = jnp.linspace(1e-3, 50.0*omega_c, num_omega)
+def setup_noise_parameters(t_grid, eta, omega_c, s, kBT, g=1.0, num_omega=10_000):
+    omega_grid = jnp.linspace(1e-5, 30.0*omega_c, num_omega)
     d_omega = omega_grid[1] - omega_grid[0]
     
     # 1. Spectral Amplitude
@@ -66,8 +66,8 @@ def generate_noise_fast(key, transfer_matrix):
     return jnp.real(complex_trajectory)
 
 
-def generate_noise(key, t_grid, eta, omega_c, s, kBT, g=1.0, num_omega=2000):
-    omega_grid = jnp.linspace(1e-3, 50.0*omega_c, num_omega)
+def generate_noise(key, t_grid, eta, omega_c, s, kBT, g=1.0, num_omega=10_000):
+    omega_grid = jnp.linspace(1e-5, 30.0*omega_c, num_omega)
     d_omega = omega_grid[1] - omega_grid[0]
     
     # 1. Spectral Function A(w) = 2 * J(w)
@@ -250,7 +250,7 @@ def run_twa_bundle(keys, t_grid, eta, omega_c, s, kBT, B_field, g, initial_direc
     return total_sum / n_total
 
 
-def compute_exact_expectation_value(t_grid, initial_state, eta, omega_c, s, kBT, g, num_omega=10000):
+def compute_exact_expectation_value(t_grid, initial_state, eta, omega_c, s, kBT, g, num_omega=10_000):
     """
     Calculates the Exact Quantum Mechanical Expectation Value <Sx(t)>
     for the Pure Dephasing Spin-Boson model (B=0).
@@ -264,7 +264,7 @@ def compute_exact_expectation_value(t_grid, initial_state, eta, omega_c, s, kBT,
     sx0, sy0, sz0 = S0 / norm
     
     # 2. Frequency Grid
-    omega = jnp.linspace(1e-3, 50.0 * omega_c, num_omega)
+    omega = jnp.linspace(1e-5, 30.0*omega_c, num_omega)
     
     # 3. Spectral Density A(w)
     A_vals = 2.0 * eta * omega * jnp.power(omega / omega_c, s - 1) * jnp.exp(-omega / omega_c)
