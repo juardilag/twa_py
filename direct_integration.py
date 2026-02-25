@@ -292,3 +292,34 @@ def compute_exact_expectation_value(t_grid, initial_state, eta, omega_c, s, kBT,
     sz_t = jnp.full_like(t_grid, sz0) # Sz is conserved
     
     return sx_t
+
+
+def compute_markovian_expectation_value(t_grid, initial_state, eta, omega_c, kBT, g):
+    """
+    Calculates the High-Temperature Ohmic Markovian limit for <Sx(t)>.
+    Assumes s=1 and kBT >> omega.
+    """
+    # 1. Normalize Initial State
+    S0 = jnp.array(initial_state)
+    norm = jnp.linalg.norm(S0)
+    sx0, sy0, sz0 = S0 / norm
+
+    # 2. Markovian Decay Rate (Gamma(t) = gamma * t)
+    # From our derivation: gamma = g^2 * eta * kBT
+    # Note: Factors of pi depend on your specific spectral density normalization.
+    # For A(w) = 2*eta*w*exp(-w/wc), the limit is:
+    gamma_markov = (g**2 * eta * kBT) 
+    gamma_t = gamma_markov * t_grid
+
+    # 3. Frequency Shift (Phi(t) = delta_omega * t)
+    # In the Ohmic case, Phi(t) also linearizes at long times.
+    # delta_omega = g^2 * integral[ A(w) / (pi * w) ]
+    # For s=1: delta_omega = 2 * g^2 * eta * omega_c / pi
+    delta_omega = (2.0 * g**2 * eta * omega_c) / jnp.pi
+    phi_t = delta_omega * t_grid
+
+    # 4. Construct Expectation Values
+    decay = jnp.exp(-gamma_t)
+    sx_t = decay * (sx0 * jnp.cos(phi_t) + sy0 * jnp.sin(phi_t))
+    
+    return sx_t
