@@ -14,7 +14,7 @@ def get_spectral_density(omega, eta, omega_c, s):
 
 # Memory Kernel
 def compute_memory_kernel(tau_grid, eta, omega_c, s, g=1.0, num_omega=10_000):
-    omega_grid = jnp.linspace(1e-5, 30*omega_c, num_omega)
+    omega_grid = jnp.linspace(1e-6, 30*omega_c, num_omega)
     A_vals = 2.0 * get_spectral_density(omega_grid, eta, omega_c, s)
     sin_matrix = jnp.sin(jnp.outer(tau_grid, omega_grid))
 
@@ -25,7 +25,7 @@ def compute_memory_kernel(tau_grid, eta, omega_c, s, g=1.0, num_omega=10_000):
 
 # Noise Generation
 def setup_noise_parameters(t_grid, eta, omega_c, s, kBT, g=1.0, num_omega=10_000):
-    omega_grid = jnp.linspace(1e-5, 30.0*omega_c, num_omega)
+    omega_grid = jnp.linspace(1e-6, 30.0*omega_c, num_omega)
     d_omega = omega_grid[1] - omega_grid[0]
     
     # 1. Spectral Amplitude
@@ -67,7 +67,7 @@ def generate_noise_fast(key, transfer_matrix):
 
 
 def generate_noise(key, t_grid, eta, omega_c, s, kBT, g=1.0, num_omega=10_000):
-    omega_grid = jnp.linspace(1e-5, 30.0*omega_c, num_omega)
+    omega_grid = jnp.linspace(1e-6, 30.0*omega_c, num_omega)
     d_omega = omega_grid[1] - omega_grid[0]
     
     # 1. Spectral Function A(w) = 2 * J(w)
