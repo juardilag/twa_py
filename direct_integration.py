@@ -134,7 +134,21 @@ def compute_effective_field(S_state, history_array, step_idx, gamma_kernel,
     eff_field_contrib = xi_t + memory_val
     
     if coupling_type == "z":
-         eff_field_contrib = jnp.array([0.0, 0.0, eff_field_contrib[2]])
+            memory_history_z = jnp.dot(gamma_causal, history_array[:, 2]) * dt
+            memory_instant_z = gamma_kernel[0] * S_state[2] * dt
+            
+            # Only the Z-noise contributes to the torque
+            xi_t_z = noise_traj[jnp.clip(step_idx, 0, noise_traj.shape[0]-1), 2]
+            
+            # The total dissipative field is strictly longitudinal
+            phi_total_z = xi_t_z + memory_history_z + memory_instant_z
+            eff_field_contrib = jnp.array([0.0, 0.0, phi_total_z])
+        
+    else:
+        # Isotropic case: 3D vector dot product
+        memory_val = jnp.dot(gamma_causal, history_array) * dt + gamma_kernel[0] * S_state * dt
+        xi_t = noise_traj[jnp.clip(step_idx, 0, noise_traj.shape[0]-1)]
+        eff_field_contrib = xi_t + memory_val
 
     return B_field + eff_field_contrib
 
