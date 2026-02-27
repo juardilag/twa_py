@@ -100,37 +100,38 @@ def discrete_spin_sampling_single(key, target_vector, width_scale=None):
     # CRITICAL: Do NOT normalize s_global. Return it with length sqrt(3).
     return s_global
 
-def discrete_spin_sampling_factorized(key, target_vector):
+def discrete_spin_sampling_factorized(key, target_vector, coupling_type="z"):
     """
     Samples Sx, Sy, Sz INDEPENDENTLY in the Lab Frame.
-    Constrains values to be strictly +1 or -1.
+    Constrains values to be strictly +1 or -1 for standard DTWA.
     
-    This fixes the "Artificial Inhomogeneous Broadening" for Tilted States
-    by ensuring Sz (the frequency generator) is always a discrete eigenvalue.
+    This incorporates the artifact fix for Pure Dephasing ("z" coupling).
     """
     # 1. Normalize Target Vector (Bloch Vector components u, v, w)
-    # These correspond to the quantum expectations <Sx>, <Sy>, <Sz>
     n = target_vector / (jnp.linalg.norm(target_vector) + 1e-12)
     
     # 2. Calculate Probabilities for +1
-    # If <Sz> = w, then P(Sz=+1) * 1 + P(Sz=-1) * (-1) = w
-    # => (2p - 1) = w  =>  p = (1 + w) / 2
-    p_x = (1.0 + n[0]) / 2.0
-    p_y = (1.0 + n[1]) / 2.0
-    p_z = (1.0 + n[2]) / 2.0
-    
-    # Clip probabilities to [0, 1] for numerical safety
-    p_x = jnp.clip(p_x, 0.0, 1.0)
-    p_y = jnp.clip(p_y, 0.0, 1.0)
-    p_z = jnp.clip(p_z, 0.0, 1.0)
+    #
+    p_x = jnp.clip((1.0 + n[0]) / 2.0, 0.0, 1.0)
+    p_y = jnp.clip((1.0 + n[1]) / 2.0, 0.0, 1.0)
+    p_z = jnp.clip((1.0 + n[2]) / 2.0, 0.0, 1.0)
     
     # 3. Sample Each Component Independently
     k1, k2, k3 = jax.random.split(key, 3)
     
-    # JAX trick: random.uniform < p  gives True with prob p.
-    # We map True -> +1.0, False -> -1.0
+    # Map True -> +1.0, False -> -1.0
     sx = jnp.where(jax.random.uniform(k1) < p_x, 1.0, -1.0)
     sy = jnp.where(jax.random.uniform(k2) < p_y, 1.0, -1.0)
-    sz = jnp.where(jax.random.uniform(k3) < p_z, 1.0, -1.0)
     
+    # 4. Handle Coupling Logic
+    # JAX's lax.cond or simple python 'if' works here if coupling_type is static
+    if coupling_type == "z":
+        # ARTIFACT FIX: Sz is a constant of motion.
+        # Suppress its Wigner fluctuations to prevent artificial inhomogeneous broadening.
+        sz = n[2]
+    else:
+        # GENERAL CASE: Isotropic coupling or general Hamiltonian.
+        # We must sample the quantum fluctuations.
+        sz = jnp.where(jax.random.uniform(k3) < p_z, 1.0, -1.0)
+        
     return jnp.array([sx, sy, sz])
