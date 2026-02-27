@@ -156,44 +156,50 @@ def compute_effective_field(S_state, history_array, step_idx, gamma_kernel,
 # --- 2. The Heun Integrator ---
 @jax.jit
 def heun_step_non_markovian(state_trajectory, step_idx, noise_traj, gamma_kernel, B_field, dt):
-    # Current time index (n)
+# Current time index (n)
     curr_idx = step_idx - 1
     S_curr = state_trajectory[curr_idx]
     
-    # --- STAGE 1: PREDICTOR (Euler) ---
+    # --- STAGE 1: PREDICTOR ---
     # Calculate Field at t_n
     B_eff_curr = compute_effective_field(
         S_curr, state_trajectory, curr_idx, 
-        gamma_kernel, noise_traj, B_field, dt
+        gamma_kernel, noise_traj, B_field, dt, coupling_type="z"
     )
     
-    dS_1 = jnp.cross(S_curr, B_eff_curr)
-    S_pred = S_curr + dS_1 * dt
-    
-    # --- STAGE 2: CORRECTOR ---
-    # Temporarily update history to allow convolution to "see" the future prediction
+    # Simple Euler predictor just to estimate the future history
+    S_pred = S_curr + jnp.cross(S_curr, B_eff_curr) * dt
     traj_with_pred = state_trajectory.at[step_idx].set(S_pred)
     
+    # --- STAGE 2: FUTURE FIELD ---
     # Calculate Field at t_{n+1}
     B_eff_next = compute_effective_field(
         S_pred, traj_with_pred, step_idx, 
-        gamma_kernel, noise_traj, B_field, dt
+        gamma_kernel, noise_traj, B_field, dt, coupling_type="z"
     )
     
-    dS_2 = jnp.cross(S_pred, B_eff_next)
+    # --- STAGE 3: STRATONOVICH MIDPOINT ROTATION ---
+    # Average the fields to get the Stratonovich effective rotation axis
+    B_mid = 0.5 * (B_eff_curr + B_eff_next)
     
-    # Heun Update: Average the slopes
-    S_next = S_curr + 0.5 * (dS_1 + dS_2) * dt
+    # Calculate the rotation angle and axis
+    b_norm = jnp.linalg.norm(B_mid) + 1e-12 # Prevent division by zero
+    k = B_mid / b_norm
+    theta = b_norm * dt
     
-    # --- STAGE 3: NORMALIZATION ---
-    # Crucial for stability in long simulations
-    target_norm = jnp.linalg.norm(S_curr)
-    S_next_renorm = S_next / (jnp.linalg.norm(S_next) + 1e-12) * target_norm
+    # Apply Rodrigues' Rotation Formula
+    # v_rot = v*cos(θ) + (k x v)*sin(θ) + k*(k . v)*(1 - cos(θ))
+    k_cross_S = jnp.cross(k, S_curr)
+    k_dot_S = jnp.dot(k, S_curr)
     
-    # Write final result
-    new_state_traj = state_trajectory.at[step_idx].set(S_next_renorm)
+    S_next = (S_curr * jnp.cos(theta) + 
+              k_cross_S * jnp.sin(theta) + 
+              k * k_dot_S * (1.0 - jnp.cos(theta)))
     
-    return new_state_traj, S_next_renorm
+    # Write final result. Notice there is NO artificial normalization needed!
+    new_state_traj = state_trajectory.at[step_idx].set(S_next)
+    
+    return new_state_traj, S_next
 
 
 def run_twa_bundle(keys, t_grid, eta, omega_c, s, kBT, B_field, g, initial_direction, batch_size=2000):
