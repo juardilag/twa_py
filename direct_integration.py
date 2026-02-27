@@ -281,7 +281,7 @@ def compute_exact_expectation_value(t_grid, initial_state, eta, omega_c, s, kBT,
     # 5. Phi(t)
     def get_phi(t):
         integrand = (A_vals / (jnp.pi * omega**2)) * (omega * t - jnp.sin(omega * t))
-        return g**2 * jnp.trapezoid(integrand, x=omega)
+        return g**2*sz0*jnp.trapezoid(integrand, x=omega)
 
     phi_t = jax.vmap(get_phi)(t_grid)
     
@@ -316,7 +316,7 @@ def compute_markovian_expectation_value(t_grid, initial_state, eta, omega_c, kBT
     # delta_omega = g^2 * integral[ A(w) / (pi * w) ]
     # For s=1: delta_omega = 2 * g^2 * eta * omega_c / pi
     delta_omega = (2.0 * g**2 * eta * omega_c) / jnp.pi
-    phi_t = delta_omega * t_grid
+    phi_t = sz0*delta_omega * t_grid
 
     # 4. Construct Expectation Values
     decay = jnp.exp(-gamma_t)
