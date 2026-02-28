@@ -1,20 +1,30 @@
 import jax.numpy as jnp
-from jax import vmap
 import jax
 from initial_samplings import discrete_spin_sampling_factorized
 from tqdm.auto import tqdm
 
 jax.config.update("jax_enable_x64", True)
 
+def get_omega_grid(s, omega_c, num_omega):
+    """
+    Selects the optimal frequency grid based on the spectral exponent s.
+   
+    """
+    if s < 1.0:
+        # Sub-Ohmic: Logarithmic grid to resolve the w->0 divergence.
+        return jnp.logspace(-7, jnp.log10(30.0 * omega_c), num_omega)
+    else:
+        # Ohmic/Super-Ohmic: Linear grid is more efficient for high-frequency peaks.
+        return jnp.linspace(1e-7, 30.0 * omega_c, num_omega)
+
 def get_spectral_density(omega, eta, omega_c, s):
     safe_omega = jnp.where(omega > 0, omega, 1.0) 
     J_val = eta * safe_omega * jnp.power(safe_omega / omega_c, s - 1) * jnp.exp(-safe_omega / omega_c)
     return jnp.where(omega > 0, J_val, 0.0)
 
-
 # Memory Kernel
 def compute_memory_kernel(tau_grid, eta, omega_c, s, g=1.0, num_omega=10_000):
-    omega_grid = jnp.linspace(1e-6, 30*omega_c, num_omega)
+    omega_grid = get_omega_grid(s, omega_c, num_omega)
     A_vals = 2.0 * get_spectral_density(omega_grid, eta, omega_c, s)
     sin_matrix = jnp.sin(jnp.outer(tau_grid, omega_grid))
 
@@ -25,8 +35,10 @@ def compute_memory_kernel(tau_grid, eta, omega_c, s, g=1.0, num_omega=10_000):
 
 # Noise Generation
 def setup_noise_parameters(t_grid, eta, omega_c, s, kBT, g=1.0, num_omega=10_000):
-    omega_grid = jnp.linspace(1e-6, 30.0*omega_c, num_omega)
-    d_omega = omega_grid[1] - omega_grid[0]
+    omega_grid = get_omega_grid(s, omega_c, num_omega)
+    
+    # Calculate non-uniform d_omega for integration weights
+    d_omega = jnp.diff(omega_grid, append=omega_grid[-1] + (omega_grid[-1]-omega_grid[-2]))
     
     # 1. Spectral Amplitude
     safe_omega = jnp.maximum(omega_grid, 1e-12)
@@ -35,12 +47,9 @@ def setup_noise_parameters(t_grid, eta, omega_c, s, kBT, g=1.0, num_omega=10_000
     x = safe_omega / (2.0 * kBT)
     thermal_factor = 1.0 / jnp.tanh(x)
     
-    # Amplitude coefficient: g * sqrt( J(w) * coth(...) * dw / pi )
-    # variance_density = (2*J * coth) / (2pi) = J*coth/pi
+    # Amplitude coefficient handles non-uniform weights
     amplitude = g * jnp.sqrt((J_omega * thermal_factor * d_omega) / jnp.pi)
     
-    # 2. Construct the Evolution Operator Matrix (Time x Freq)
-    # We use the identity: A*cos(wt) + B*sin(wt) = Re[ (A + iB) * e^(-iwt) ]
     time_evolution = jnp.exp(-1j * jnp.outer(t_grid, omega_grid))
     transfer_matrix = time_evolution * amplitude[None, :]
     
@@ -156,39 +165,27 @@ def compute_effective_field(S_state, history_array, step_idx, gamma_kernel,
 # --- 2. The Heun Integrator ---
 @jax.jit
 def heun_step_non_markovian(state_trajectory, step_idx, noise_traj, gamma_kernel, B_field, dt):
-# Current time index (n)
     curr_idx = step_idx - 1
     S_curr = state_trajectory[curr_idx]
     
-    # --- STAGE 1: PREDICTOR ---
-    # Calculate Field at t_n
     B_eff_curr = compute_effective_field(
         S_curr, state_trajectory, curr_idx, 
         gamma_kernel, noise_traj, B_field, dt, coupling_type="z"
     )
     
-    # Simple Euler predictor just to estimate the future history
     S_pred = S_curr + jnp.cross(S_curr, B_eff_curr) * dt
     traj_with_pred = state_trajectory.at[step_idx].set(S_pred)
     
-    # --- STAGE 2: FUTURE FIELD ---
-    # Calculate Field at t_{n+1}
     B_eff_next = compute_effective_field(
         S_pred, traj_with_pred, step_idx, 
         gamma_kernel, noise_traj, B_field, dt, coupling_type="z"
     )
     
-    # --- STAGE 3: STRATONOVICH MIDPOINT ROTATION ---
-    # Average the fields to get the Stratonovich effective rotation axis
     B_mid = 0.5 * (B_eff_curr + B_eff_next)
-    
-    # Calculate the rotation angle and axis
-    b_norm = jnp.linalg.norm(B_mid) + 1e-12 # Prevent division by zero
+    b_norm = jnp.linalg.norm(B_mid) + 1e-12
     k = B_mid / b_norm
     theta = b_norm * dt
     
-    # Apply Rodrigues' Rotation Formula
-    # v_rot = v*cos(θ) + (k x v)*sin(θ) + k*(k . v)*(1 - cos(θ))
     k_cross_S = jnp.cross(k, S_curr)
     k_dot_S = jnp.dot(k, S_curr)
     
@@ -196,9 +193,7 @@ def heun_step_non_markovian(state_trajectory, step_idx, noise_traj, gamma_kernel
               k_cross_S * jnp.sin(theta) + 
               k * k_dot_S * (1.0 - jnp.cos(theta)))
     
-    # Write final result. Notice there is NO artificial normalization needed!
     new_state_traj = state_trajectory.at[step_idx].set(S_next)
-    
     return new_state_traj, S_next
 
 
@@ -271,25 +266,13 @@ def run_twa_bundle(keys, t_grid, eta, omega_c, s, kBT, B_field, g, initial_direc
 
 
 def compute_exact_expectation_value(t_grid, initial_state, eta, omega_c, s, kBT, g, num_omega=10_000):
-    """
-    Calculates the Exact Quantum Mechanical Expectation Value <Sx(t)>
-    for the Pure Dephasing Spin-Boson model (B=0).
-    
-    Returns:
-        sx_t, sy_t, sz_t: Arrays of expectation values.
-    """
-    # 1. Normalize Initial State
     S0 = jnp.array(initial_state)
     norm = jnp.linalg.norm(S0)
     sx0, sy0, sz0 = S0 / norm
     
-    # 2. Frequency Grid
-    omega = jnp.linspace(1e-5, 30.0*omega_c, num_omega)
-    
-    # 3. Spectral Density A(w)
+    # Use higher resolution grid for the exact benchmark
+    omega = get_omega_grid(s, omega_c, num_omega)
     A_vals = 2.0 * eta * omega * jnp.power(omega / omega_c, s - 1) * jnp.exp(-omega / omega_c)
-    
-    # 4. Decoherence Function Gamma(t)
     thermal_factor = 1.0 / jnp.tanh(omega / (2.0 * kBT))
     
     def get_gamma(t):
@@ -298,19 +281,14 @@ def compute_exact_expectation_value(t_grid, initial_state, eta, omega_c, s, kBT,
         
     gamma_t = jax.vmap(get_gamma)(t_grid)
     
-    # 5. Phi(t)
     def get_phi(t):
         integrand = (A_vals / (jnp.pi * omega**2)) * (omega * t - jnp.sin(omega * t))
-        return g**2*sz0*jnp.trapezoid(integrand, x=omega)
+        return g**2 * sz0 * jnp.trapezoid(integrand, x=omega)
 
     phi_t = jax.vmap(get_phi)(t_grid)
     
-    # 6. Construct Expectation Values
     decay = jnp.exp(-gamma_t)
     sx_t = decay * (sx0 * jnp.cos(phi_t) + sy0 * jnp.sin(phi_t))
-    sy_t = decay * (sy0 * jnp.cos(phi_t) - sx0 * jnp.sin(phi_t))
-    sz_t = jnp.full_like(t_grid, sz0) # Sz is conserved
-    
     return sx_t
 
 
