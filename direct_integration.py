@@ -265,12 +265,13 @@ def run_twa_bundle(keys, t_grid, eta, omega_c, s, kBT, B_field, g, initial_direc
     return total_sum / n_total
 
 
-def compute_exact_expectation_value(t_grid, initial_state, eta, omega_c, s, kBT, g, num_omega=10_000):
+def compute_exact_expectation_value(t_grid, initial_state, eta, omega_c, s, kBT, g, B_field, num_omega=10_000):
     S0 = jnp.array(initial_state)
     norm = jnp.linalg.norm(S0)
     sx0, sy0, sz0 = S0 / norm
     
     # Use higher resolution grid for the exact benchmark
+    omega_L = B_field[2]
     omega = get_omega_grid(s, omega_c, num_omega)
     A_vals = 2.0 * eta * omega * jnp.power(omega / omega_c, s - 1) * jnp.exp(-omega / omega_c)
     thermal_factor = 1.0 / jnp.tanh(omega / (2.0 * kBT))
@@ -286,13 +287,15 @@ def compute_exact_expectation_value(t_grid, initial_state, eta, omega_c, s, kBT,
         return g**2 * sz0 * jnp.trapezoid(integrand, x=omega)
 
     phi_t = jax.vmap(get_phi)(t_grid)
+
+    theta_total = omega_L * t_grid + phi_t
     
     decay = jnp.exp(-gamma_t)
-    sx_t = decay * (sx0 * jnp.cos(phi_t) + sy0 * jnp.sin(phi_t))
+    sx_t = decay * (sx0 * jnp.cos(theta_total) + sy0 * jnp.sin(theta_total))
     return sx_t
 
 
-def compute_markovian_expectation_value(t_grid, initial_state, eta, omega_c, kBT, g):
+def compute_markovian_expectation_value(t_grid, initial_state, eta, omega_c, kBT, g, B_field):
     """
     Calculates the High-Temperature Ohmic Markovian limit for <Sx(t)>.
     Assumes s=1 and kBT >> omega.
@@ -314,10 +317,12 @@ def compute_markovian_expectation_value(t_grid, initial_state, eta, omega_c, kBT
     # delta_omega = g^2 * integral[ A(w) / (pi * w) ]
     # For s=1: delta_omega = 2 * g^2 * eta * omega_c / pi
     delta_omega = (2.0 * g**2 * eta * omega_c) / jnp.pi
+    omega_L = B_field[2]
     phi_t = sz0*delta_omega * t_grid
+    theta_total = omega_L * t_grid + phi_t
 
     # 4. Construct Expectation Values
     decay = jnp.exp(-gamma_t)
-    sx_t = decay * (sx0 * jnp.cos(phi_t) + sy0 * jnp.sin(phi_t))
+    sx_t = decay * (sx0 * jnp.cos(theta_total) + sy0 * jnp.sin(theta_total))
     
     return sx_t
