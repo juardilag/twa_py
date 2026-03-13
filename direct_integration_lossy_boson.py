@@ -122,3 +122,53 @@ def compute_effective_field(S_state, history_array, step_idx, gamma_kernel,
     eff_field_contrib = xi_t.at[0].add(phi_memory_x) 
 
     return B_field + eff_field_contrib
+
+
+@jax.jit
+def heun_step_non_markovian(state_trajectory, step_idx, noise_traj, gamma_kernel, B_field, dt):
+    """
+    Performs a single step of the Heun (Predictor-Corrector) integration.
+    Adapted for the non-Markovian spin EOM from the provided notes.
+    """
+    curr_idx = step_idx - 1
+    S_curr = state_trajectory[curr_idx]
+    
+    # 1. Predictor Step: Estimate S_pred at t + dt
+    # Compute field based on current state and history
+    B_eff_curr = compute_effective_field(
+        S_curr, state_trajectory, curr_idx, 
+        gamma_kernel, noise_traj, B_field, dt
+    )
+    
+    # Standard Euler predictor
+    S_pred = S_curr + jnp.cross(S_curr, B_eff_curr) * dt
+    
+    # Temporarily update the trajectory with the prediction to compute the next field
+    traj_with_pred = state_trajectory.at[step_idx].set(S_pred)
+    
+    # 2. Corrector Step: Re-estimate field at t + dt using the prediction
+    B_eff_next = compute_effective_field(
+        S_pred, traj_with_pred, step_idx, 
+        gamma_kernel, noise_traj, B_field, dt
+    )
+    
+    # 3. Average the fields (Trapezoidal rule)
+    B_mid = 0.5 * (B_eff_curr + B_eff_next)
+    
+    # 4. Geometric Rotation (Rodrigues' Rotation Formula)
+    # This ensures the spin norm |S|=1 is preserved exactly.
+    b_norm = jnp.linalg.norm(B_mid) + 1e-12
+    k = B_mid / b_norm
+    theta = b_norm * dt
+    
+    k_cross_S = jnp.cross(k, S_curr)
+    k_dot_S = jnp.dot(k, S_curr)
+    
+    S_next = (S_curr * jnp.cos(theta) + 
+              k_cross_S * jnp.sin(theta) + 
+              k * k_dot_S * (1.0 - jnp.cos(theta)))
+    
+    # Update the permanent trajectory array
+    new_state_traj = state_trajectory.at[step_idx].set(S_next)
+    
+    return new_state_traj, S_next
