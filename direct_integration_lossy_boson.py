@@ -172,3 +172,66 @@ def heun_step_non_markovian(state_trajectory, step_idx, noise_traj, gamma_kernel
     new_state_traj = state_trajectory.at[step_idx].set(S_next)
     
     return new_state_traj, S_next
+
+
+def run_twa_bundle(keys, t_grid, omega_0, kappa, kBT, B_field, g, initial_direction, batch_size=1000):
+    """
+    Manages the DTWA simulation by parallelizing trajectories across JAX devices.
+    """
+    dt = t_grid[1] - t_grid[0]
+    num_steps = t_grid.shape[0]
+    n_total = keys.shape[0]
+    
+    # 1. Pre-compute Kernel (Analytical form from your Eq. 23)
+    # This captures the non-Markovian memory of the single boson
+    print("1. Computing Analytical Memory Kernel...")
+    gamma_kernel_fine = compute_memory_kernel(t_grid, omega_0, kappa, g)
+    
+    # 2. Pre-compute Noise Transfer Matrix
+    # This satisfies the FDT for the Lorentzian spectral density of the lossy boson
+    print("2. Pre-computing Noise Transfer Matrix...")
+    noise_transfer_matrix = setup_noise_parameters(t_grid, omega_0, kappa, kBT, g)
+    
+    # 3. Define the Single Trajectory Solver
+    def solve_single_trajectory(key):
+        k_samp, k_noise = jax.random.split(key)
+        
+        # A. Sample Initial State (Discrete Spin Sampling)
+        s0 = discrete_spin_sampling_factorized(k_samp, initial_direction)
+        
+        # B. Generate Noise (Xi(t) restricted to the x-axis)
+        noise_traj = generate_noise_fast(k_noise, noise_transfer_matrix)
+        
+        # C. Initialize History Array
+        history_init = jnp.zeros((num_steps, 3)).at[0].set(s0)
+        
+        # D. Time Loop using jax.lax.scan for high-performance execution
+        def scan_body(carry, idx):
+            # carry is the state_trajectory
+            return heun_step_non_markovian(carry, idx, noise_traj, gamma_kernel_fine, B_field, dt)
+
+        final_traj, _ = jax.lax.scan(scan_body, history_init, jnp.arange(1, num_steps))
+        return final_traj
+
+    # 4. Batch Processor with JAX vmap
+    @jax.jit
+    def process_batch_sum(batch_keys):
+        batch_trajs = jax.vmap(solve_single_trajectory)(batch_keys)
+        return jnp.sum(batch_trajs, axis=0)
+
+    # 5. Main Averaging Loop
+    total_sum = jnp.zeros((num_steps, 3))
+    n_batches = int(jnp.ceil(n_total / batch_size))
+    
+    print(f"3. Starting DTWA: {n_total} trajectories in {n_batches} batches.")
+    
+    for i in tqdm(range(n_batches), desc="DTWA Batches"):
+        start_idx = i * batch_size
+        end_idx = min((i + 1) * batch_size, n_total)
+        current_keys = keys[start_idx:end_idx]
+        
+        batch_partial_sum = process_batch_sum(current_keys)
+        total_sum = total_sum + batch_partial_sum
+        
+    # 6. Final DTWA Average Result
+    return total_sum / n_total
