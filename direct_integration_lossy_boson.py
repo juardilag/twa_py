@@ -52,3 +52,34 @@ def setup_noise_parameters(t_grid, omega_0, kappa, kBT, g=1.0):
     transfer_matrix = time_evolution * amplitude[None, :]
     
     return transfer_matrix
+
+@jax.jit
+def generate_noise_fast(key, transfer_matrix):
+    """
+    Generates the stochastic noise trajectory Xi(t).
+    
+    In this model, the single boson exclusively couples to sigma_x, 
+    so the total fluctuating noise Xi(t) only drives the x-component.
+    """
+    num_omega = transfer_matrix.shape[1]
+    num_steps = transfer_matrix.shape[0]
+    
+    # We only need noise for the X-component (column 0) 
+    # as per Eq. (22): Xi(t) = -2g * phi_fluct(t) * x_hat
+    key_a, key_b = jax.random.split(key)
+    
+    # Sampling standard normal variables for the spectral decomposition
+    noise_A = jax.random.normal(key_a, (num_omega,))
+    noise_B = jax.random.normal(key_b, (num_omega,))
+    
+    Z_stoch = noise_A + 1j * noise_B
+
+    # Project frequencies into the time domain
+    # result shape: (num_steps,)
+    xi_x = jnp.real(transfer_matrix @ Z_stoch)
+    
+    # Construct 3D noise vector: [Xi_x(t), 0, 0]
+    # Based on Eq. (22) in your notes
+    xi_t = jnp.zeros((num_steps, 3)).at[:, 0].set(xi_x)
+    
+    return xi_t
