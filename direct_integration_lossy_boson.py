@@ -17,9 +17,9 @@ def compute_memory_kernel(tau_grid, omega_0, kappa, g=1.0):
     # From Eq. (23): D^R(tau) = 4 * exp(-kappa/2 * tau) * sin(omega_0 * tau)
     # We multiply by g^2 as per Eq. (21) in the notes
     
-    gamma_kernel = 4.0 * jnp.exp(-0.5 * kappa * tau_grid) * jnp.sin(omega_0 * tau_grid)
+    gamma_kernel = 4*jnp.exp(-0.5 * kappa * tau_grid) * jnp.sin(omega_0 * tau_grid)
     
-    return (g**2) * gamma_kernel
+    return (g**2)*gamma_kernel
 
 
 def setup_noise_parameters(t_grid, omega_0, kappa, kBT, g=1.0):
@@ -30,13 +30,14 @@ def setup_noise_parameters(t_grid, omega_0, kappa, kBT, g=1.0):
     # In the single-mode case, we don't need a massive omega_grid.
     # We sample frequencies around omega_0 to reconstruct the damped noise.
     # To resolve the width kappa, we need a grid covering several widths.
-    num_omega = 2000 
-    omega_grid = jnp.linspace(omega_0 - 5*kappa, omega_0 + 5*kappa, num_omega)
+    num_omega = 10_000 
+    omega_grid = jnp.linspace(omega_0 - 20*kappa, omega_0 + 20*kappa, num_omega)
     d_omega = omega_grid[1] - omega_grid[0]
     
     # The effective spectral density for a single lossy boson is a Lorentzian:
     # J_eff(w) = (kappa / 2π) / ((w - w0)^2 + (kappa/2)^2)
     lorentzian = (kappa / (2.0 * jnp.pi)) / ((omega_grid - omega_0)**2 + (kappa/2.0)**2)
+    print(f"Lorentzian Area: {jnp.sum(lorentzian) * d_omega:.4f}")
     
     # Quantum Thermal Factor (coth) for the FDT [cite: 43]
     safe_omega = jnp.maximum(omega_grid, 1e-12)
@@ -45,7 +46,7 @@ def setup_noise_parameters(t_grid, omega_0, kappa, kBT, g=1.0):
     
     # Amplitude coefficient handles the coupling g and the FDT 
     # We use 2.0 * g because Xi(t) = -2g * phi_fluct(t) 
-    amplitude = 2.0 * g * jnp.sqrt(lorentzian * thermal_factor * d_omega)
+    amplitude = 2*g*jnp.sqrt(lorentzian * thermal_factor * d_omega)
     
     # Time evolution matrix: exp(-i * w * t) 
     time_evolution = jnp.exp(-1j * jnp.outer(t_grid, omega_grid))
@@ -88,40 +89,32 @@ def generate_noise_fast(key, transfer_matrix):
 def compute_effective_field(S_state, history_array, step_idx, gamma_kernel, 
                             noise_traj, B_field, dt):
     """
-    Computes the effective magnetic field vector as defined in Eq. (17) and (21).
-    B_eff = B_ext + Xi(t) + Dissipative Memory
+    EOM built directly from QuTiP H = 0.5*B*sigma + g*sx*(a+adag)
     """
-    # 1. Vectorized Memory Convolution (X-component only)
-    # Based on Eq. (23), the memory only acts on the x-component
+    # 1. Precompute the memory integral (Dissipation)
+    # Note: gamma_kernel should be: 4 * exp(-kappa/2 * tau) * sin(omega_0 * tau)
+    # The factor of 4 comes from (2g)^2 derivation in Eq. (23) 
+    
     N = history_array.shape[0]
     indices = jnp.arange(N)
     lag_indices = step_idx - indices
+    gamma_causal = jnp.where(lag_indices > 0, 
+                             jnp.take(gamma_kernel, lag_indices, mode='fill', fill_value=0.0), 
+                             0.0)
 
-    # Fetch Gamma values (Memory Kernel)
-    gamma_vals = jnp.take(gamma_kernel, lag_indices, mode='fill', fill_value=0.0)
+    # memory_val = g^2 * integral[ D^R(t-t') * sigma_x(t') ]
+    # We use a negative sign here because the back-action MUST be dissipative (friction)
+    memory_x = -1.0 * (jnp.dot(gamma_causal, history_array[:, 0]) * dt)
     
-    # Causality: mask out current and future time steps for the history integral
-    gamma_causal = jnp.where(lag_indices > 0, gamma_vals, 0.0)
-
-    # Calculate the Memory Integral for the X-component only 
-    # history_array[:, 0] is the x-component of the spin history
-    memory_history_x = jnp.dot(gamma_causal, history_array[:, 0]) * dt
-    
-    # Instantaneous back-action at t' = t
-    memory_instant_x = gamma_kernel[0] * S_state[0] * dt
-    
-    # Total Dissipative field (strictly longitudinal to the x-axis) 
-    phi_memory_x = memory_history_x + memory_instant_x
-
-    # 2. Add Stochastic Noise (Already restricted to X in previous step) [cite: 82]
+    # 2. Add Stochastic Noise Xi(t) = 2g * phi_fluct
+    # Ensure setup_noise_parameters uses 'amplitude = 2.0 * g * ...'
     xi_t = noise_traj[jnp.clip(step_idx, 0, noise_traj.shape[0]-1)]
     
-    # 3. Combine with External Magnetic Field [cite: 65, 80]
-    # B_field = [Bx, By, Bz]
-    # The total contribution from the boson (Noise + Memory) is only in X
-    eff_field_contrib = xi_t.at[0].add(phi_memory_x) 
-
-    return B_field + eff_field_contrib
+    # 3. Total Effective Field
+    # Only the x-component is modified by the boson coupling [cite: 81, 85]
+    eff_field_x = B_field[0] + xi_t[0] + memory_x
+    
+    return jnp.array([eff_field_x, B_field[1], B_field[2]])
 
 
 @jax.jit
