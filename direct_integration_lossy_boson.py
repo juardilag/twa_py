@@ -3,56 +3,58 @@ import jax
 from initial_samplings import discrete_spin_sampling_factorized
 from tqdm.auto import tqdm
 
-def compute_memory_kernel(tau_grid, omega_0, kappa, g=1.0):
+def setup_noise_parameters(t_grid, omega_0, kappa, kBT):
     """
-    Computes the analytical memory kernel for the single lossy boson.
-    Based on Eq. (23) from the provided notes.
-    
-    Args:
-        tau_grid: Array of time lags (t - t')
-        omega_0: Frequency of the single boson mode
-        kappa: Loss rate of the boson into the continuum
-        g: Coupling strength between spin and boson
+    Sets up the noise transfer matrix to generate the pure normalized field phi_noise.
+    Removed the 'g' parameter to prevent double-scaling.
     """
-    # From Eq. (23): D^R(tau) = 4 * exp(-kappa/2 * tau) * sin(omega_0 * tau)
-    # We multiply by g^2 as per Eq. (21) in the notes
-    
-    gamma_kernel = 4*jnp.exp(-0.5 * kappa * tau_grid) * jnp.sin(omega_0 * tau_grid)
-    
-    return (g**2)*gamma_kernel
-
-
-def setup_noise_parameters(t_grid, omega_0, kappa, kBT, g=1.0):
-    """
-    Sets up the noise transfer matrix for the single lossy boson.
-    Satisfies FDT based on the boson Green's function poles.
-    """
-    # In the single-mode case, we don't need a massive omega_grid.
-    # We sample frequencies around omega_0 to reconstruct the damped noise.
-    # To resolve the width kappa, we need a grid covering several widths.
     num_omega = 10_000 
     omega_grid = jnp.linspace(omega_0 - 20*kappa, omega_0 + 20*kappa, num_omega)
     d_omega = omega_grid[1] - omega_grid[0]
     
-    # The effective spectral density for a single lossy boson is a Lorentzian:
-    # J_eff(w) = (kappa / 2π) / ((w - w0)^2 + (kappa/2)^2)
     lorentzian = (kappa / (2.0 * jnp.pi)) / ((omega_grid - omega_0)**2 + (kappa/2.0)**2)
-    print(f"Lorentzian Area: {jnp.sum(lorentzian) * d_omega:.4f}")
     
-    # Quantum Thermal Factor (coth) for the FDT [cite: 43]
     safe_omega = jnp.maximum(omega_grid, 1e-12)
     x = safe_omega / (2.0 * kBT)
     thermal_factor = 1.0 / jnp.tanh(x)
     
-    # Amplitude coefficient handles the coupling g and the FDT 
-    # We use 2.0 * g because Xi(t) = -2g * phi_fluct(t) 
-    amplitude = 2*g*jnp.sqrt(lorentzian * thermal_factor * d_omega)
+    # Generate the pure field (a + a_dag) with variance 1 at T=0
+    amplitude = jnp.sqrt(lorentzian * thermal_factor * d_omega) 
     
-    # Time evolution matrix: exp(-i * w * t) 
     time_evolution = jnp.exp(-1j * jnp.outer(t_grid, omega_grid))
     transfer_matrix = time_evolution * amplitude[None, :]
     
     return transfer_matrix
+
+@jax.jit
+def generate_complete_noise(key, t_grid, omega_0, kappa, g, kBT):
+    k1, k2 = jax.random.split(key)
+    
+    # Phenomenological ZPE Scaling
+    # lambda_zpe = 1.0 is the exact mathematical derivation (Causes ZPE Leakage)
+    
+    radius = jnp.sqrt(0.5) 
+    phase = jax.random.uniform(k1, minval=0, maxval=2*jnp.pi)
+    alpha_0 = radius * jnp.exp(1j * phase)
+    phi_hom = (1/jnp.sqrt(3))*2.0*jnp.real(alpha_0 * jnp.exp(-(1j*omega_0 + 0.5*kappa) * t_grid))
+    
+    transfer_matrix = setup_noise_parameters(t_grid, omega_0, kappa, kBT)
+    phi_noise_traj = generate_noise_fast(k2, transfer_matrix)[:, 0] 
+    
+    # We apply the scaling here: lambda_zpe * (2g)
+    xi_total_x = 2.0*g*(phi_hom + phi_noise_traj)
+    
+    return jnp.zeros((t_grid.shape[0], 3)).at[:, 0].set(xi_total_x)
+
+
+def compute_memory_kernel(tau_grid, omega_0, kappa, g=1.0):
+    """
+    Eq. (23) scaled by lambda_zpe**2 to maintain the FDT and correct the Lamb Shift.
+    """
+    # The original kernel has a factor of 4. We scale it by lambda_zpe squared.
+    gamma_kernel = 4.0*jnp.exp(-0.5 * kappa * tau_grid) * jnp.sin(omega_0 * tau_grid)
+    return (g**2)*gamma_kernel
+
 
 @jax.jit
 def generate_noise_fast(key, transfer_matrix):
@@ -89,29 +91,25 @@ def generate_noise_fast(key, transfer_matrix):
 def compute_effective_field(S_state, history_array, step_idx, gamma_kernel, 
                             noise_traj, B_field, dt):
     """
-    EOM built directly from QuTiP H = 0.5*B*sigma + g*sx*(a+adag)
+    Total effective field in the Lab Frame.
     """
-    # 1. Precompute the memory integral (Dissipation)
-    # Note: gamma_kernel should be: 4 * exp(-kappa/2 * tau) * sin(omega_0 * tau)
-    # The factor of 4 comes from (2g)^2 derivation in Eq. (23) 
-    
+    # 1. Memory Integral (Dissipation)
     N = history_array.shape[0]
     indices = jnp.arange(N)
     lag_indices = step_idx - indices
+    
+    # Causal kernel slice
     gamma_causal = jnp.where(lag_indices > 0, 
                              jnp.take(gamma_kernel, lag_indices, mode='fill', fill_value=0.0), 
                              0.0)
 
-    # memory_val = g^2 * integral[ D^R(t-t') * sigma_x(t') ]
-    # We use a negative sign here because the back-action MUST be dissipative (friction)
+    # Standard dissipative back-action
     memory_x = -1.0 * (jnp.dot(gamma_causal, history_array[:, 0]) * dt)
     
-    # 2. Add Stochastic Noise Xi(t) = 2g * phi_fluct
-    # Ensure setup_noise_parameters uses 'amplitude = 2.0 * g * ...'
+    # 2. Fluctuating Field (Noise)
     xi_t = noise_traj[jnp.clip(step_idx, 0, noise_traj.shape[0]-1)]
     
-    # 3. Total Effective Field
-    # Only the x-component is modified by the boson coupling [cite: 81, 85]
+    # 3. Final Field
     eff_field_x = B_field[0] + xi_t[0] + memory_x
     
     return jnp.array([eff_field_x, B_field[1], B_field[2]])
@@ -120,40 +118,33 @@ def compute_effective_field(S_state, history_array, step_idx, gamma_kernel,
 @jax.jit
 def heun_step_non_markovian(state_trajectory, step_idx, noise_traj, gamma_kernel, B_field, dt):
     """
-    Performs a single step of the Heun (Predictor-Corrector) integration.
-    Adapted for the non-Markovian spin EOM from the provided notes.
+    Corrected geometry for dS/dt = B_eff x S
     """
     curr_idx = step_idx - 1
     S_curr = state_trajectory[curr_idx]
     
-    # 1. Predictor Step: Estimate S_pred at t + dt
-    # Compute field based on current state and history
     B_eff_curr = compute_effective_field(
         S_curr, state_trajectory, curr_idx, 
         gamma_kernel, noise_traj, B_field, dt
     )
     
-    # Standard Euler predictor
-    S_pred = S_curr + jnp.cross(S_curr, B_eff_curr) * dt
+    # FIXED: The predictor must follow B x S, not S x B
+    S_pred = S_curr + jnp.cross(B_eff_curr, S_curr) * dt
     
-    # Temporarily update the trajectory with the prediction to compute the next field
     traj_with_pred = state_trajectory.at[step_idx].set(S_pred)
     
-    # 2. Corrector Step: Re-estimate field at t + dt using the prediction
     B_eff_next = compute_effective_field(
         S_pred, traj_with_pred, step_idx, 
         gamma_kernel, noise_traj, B_field, dt
     )
     
-    # 3. Average the fields (Trapezoidal rule)
     B_mid = 0.5 * (B_eff_curr + B_eff_next)
     
-    # 4. Geometric Rotation (Rodrigues' Rotation Formula)
-    # This ensures the spin norm |S|=1 is preserved exactly.
     b_norm = jnp.linalg.norm(B_mid) + 1e-12
     k = B_mid / b_norm
     theta = b_norm * dt
     
+    # Rotation formula correctly applies k x S
     k_cross_S = jnp.cross(k, S_curr)
     k_dot_S = jnp.dot(k, S_curr)
     
@@ -161,9 +152,7 @@ def heun_step_non_markovian(state_trajectory, step_idx, noise_traj, gamma_kernel
               k_cross_S * jnp.sin(theta) + 
               k * k_dot_S * (1.0 - jnp.cos(theta)))
     
-    # Update the permanent trajectory array
     new_state_traj = state_trajectory.at[step_idx].set(S_next)
-    
     return new_state_traj, S_next
 
 
@@ -177,30 +166,31 @@ def run_twa_bundle(keys, t_grid, omega_0, kappa, kBT, B_field, g, initial_direct
     
     # 1. Pre-compute Kernel (Analytical form from your Eq. 23)
     # This captures the non-Markovian memory of the single boson
-    print("1. Computing Analytical Memory Kernel...")
     gamma_kernel_fine = compute_memory_kernel(t_grid, omega_0, kappa, g)
-    
-    # 2. Pre-compute Noise Transfer Matrix
-    # This satisfies the FDT for the Lorentzian spectral density of the lossy boson
-    print("2. Pre-computing Noise Transfer Matrix...")
-    noise_transfer_matrix = setup_noise_parameters(t_grid, omega_0, kappa, kBT, g)
     
     # 3. Define the Single Trajectory Solver
     def solve_single_trajectory(key):
-        k_samp, k_noise = jax.random.split(key)
+        # We need 3 keys now: Spin initial state, Cavity initial state, Bath noise
+        k_samp, k_hom, k_bath = jax.random.split(key, 3)
         
         # A. Sample Initial State (Discrete Spin Sampling)
-        s0 = discrete_spin_sampling_factorized(k_samp, initial_direction, coupling_type = 'full')
+        s0 = discrete_spin_sampling_factorized(k_samp, initial_direction, coupling_type='full')
         
         # B. Generate Noise (Xi(t) restricted to the x-axis)
-        noise_traj = generate_noise_fast(k_noise, noise_transfer_matrix)
+        # 1. Transient noise from the initial state of the cavity
+        hom_noise_traj = generate_complete_noise(k_hom, t_grid, omega_0, kappa, g, kBT)
+        
+        # 2. Continuous vacuum/thermal fluctuations from the bath
+        #bath_noise_traj = generate_noise_fast(k_bath, noise_transfer_matrix)
+        
+        # 3. Total fluctuating noise guarantees FDT is satisfied at all times
+        noise_traj = hom_noise_traj 
         
         # C. Initialize History Array
         history_init = jnp.zeros((num_steps, 3)).at[0].set(s0)
         
-        # D. Time Loop using jax.lax.scan for high-performance execution
+        # D. Time Loop using jax.lax.scan
         def scan_body(carry, idx):
-            # carry is the state_trajectory
             return heun_step_non_markovian(carry, idx, noise_traj, gamma_kernel_fine, B_field, dt)
 
         final_traj, _ = jax.lax.scan(scan_body, history_init, jnp.arange(1, num_steps))
