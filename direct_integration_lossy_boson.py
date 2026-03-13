@@ -83,3 +83,42 @@ def generate_noise_fast(key, transfer_matrix):
     xi_t = jnp.zeros((num_steps, 3)).at[:, 0].set(xi_x)
     
     return xi_t
+
+
+def compute_effective_field(S_state, history_array, step_idx, gamma_kernel, 
+                            noise_traj, B_field, dt):
+    """
+    Computes the effective magnetic field vector as defined in Eq. (17) and (21).
+    B_eff = B_ext + Xi(t) + Dissipative Memory
+    """
+    # 1. Vectorized Memory Convolution (X-component only)
+    # Based on Eq. (23), the memory only acts on the x-component
+    N = history_array.shape[0]
+    indices = jnp.arange(N)
+    lag_indices = step_idx - indices
+
+    # Fetch Gamma values (Memory Kernel)
+    gamma_vals = jnp.take(gamma_kernel, lag_indices, mode='fill', fill_value=0.0)
+    
+    # Causality: mask out current and future time steps for the history integral
+    gamma_causal = jnp.where(lag_indices > 0, gamma_vals, 0.0)
+
+    # Calculate the Memory Integral for the X-component only 
+    # history_array[:, 0] is the x-component of the spin history
+    memory_history_x = jnp.dot(gamma_causal, history_array[:, 0]) * dt
+    
+    # Instantaneous back-action at t' = t
+    memory_instant_x = gamma_kernel[0] * S_state[0] * dt
+    
+    # Total Dissipative field (strictly longitudinal to the x-axis) 
+    phi_memory_x = memory_history_x + memory_instant_x
+
+    # 2. Add Stochastic Noise (Already restricted to X in previous step) [cite: 82]
+    xi_t = noise_traj[jnp.clip(step_idx, 0, noise_traj.shape[0]-1)]
+    
+    # 3. Combine with External Magnetic Field [cite: 65, 80]
+    # B_field = [Bx, By, Bz]
+    # The total contribution from the boson (Noise + Memory) is only in X
+    eff_field_contrib = xi_t.at[0].add(phi_memory_x) 
+
+    return B_field + eff_field_contrib
