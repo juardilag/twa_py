@@ -129,7 +129,7 @@ def discrete_spin_sampling_factorized(key, target_vector, coupling_type="z"):
         # ARTIFACT FIX: Sz is a constant of motion.
         # Suppress its Wigner fluctuations to prevent artificial inhomogeneous broadening.
         sz = n[2]
-    else:
+    elif coupling_type == "full":
         # GENERAL CASE: Isotropic coupling or general Hamiltonian.
         # We must sample the quantum fluctuations.
         sz = jnp.where(jax.random.uniform(k3) < p_z, 1.0, -1.0)

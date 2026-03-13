@@ -197,7 +197,7 @@ def run_twa_bundle(keys, t_grid, omega_0, kappa, kBT, B_field, g, initial_direct
         k_samp, k_noise = jax.random.split(key)
         
         # A. Sample Initial State (Discrete Spin Sampling)
-        s0 = discrete_spin_sampling_factorized(k_samp, initial_direction)
+        s0 = discrete_spin_sampling_factorized(k_samp, initial_direction, coupling_type = 'full')
         
         # B. Generate Noise (Xi(t) restricted to the x-axis)
         noise_traj = generate_noise_fast(k_noise, noise_transfer_matrix)
