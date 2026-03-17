@@ -100,7 +100,7 @@ def discrete_spin_sampling_single(key, target_vector, width_scale=None):
     # CRITICAL: Do NOT normalize s_global. Return it with length sqrt(3).
     return s_global
 
-def discrete_spin_sampling_factorized(key, target_vector, coupling_type="z"):
+def discrete_spin_sampling_factorized(key, target_vector, coupling_type):
     """
     Samples Sx, Sy, Sz INDEPENDENTLY in the Lab Frame.
     Constrains values to be strictly +1 or -1 for standard DTWA.
