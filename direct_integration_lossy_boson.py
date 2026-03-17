@@ -47,7 +47,7 @@ def generate_complete_noise(key, t_grid, omega_0, kappa, g, kBT):
     
     # 3. Total Fluctuating Field (Eq. 22)
     # REMOVED GEOMETRIC FACTOR. Using pure 2*g from notes.
-    xi_total_x = -2.0 * g * (phi_hom + phi_noise_traj)
+    xi_total_x = 2.0 * g * (phi_hom + phi_noise_traj)
     return jnp.zeros((t_grid.shape[0], 3)).at[:, 0].set(xi_total_x)
 
 
@@ -80,7 +80,7 @@ def generate_noise_fast(key, transfer_matrix):
     noise_A = jax.random.normal(key_a, (num_omega,))
     noise_B = jax.random.normal(key_b, (num_omega,))
     
-    Z_stoch = noise_A + 1j * noise_B
+    Z_stoch = (noise_A + 1j * noise_B)/jnp.sqrt(2.0)
 
     # Project frequencies into the time domain
     # result shape: (num_steps,)
