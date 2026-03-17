@@ -28,32 +28,37 @@ def setup_noise_parameters(t_grid, omega_0, kappa, kBT):
 
 @jax.jit
 def generate_complete_noise(key, t_grid, omega_0, kappa, g, kBT):
+    """
+    Theoretical Noise Implementation: Xi(t) = -2g * phi_fluct(t)
+    Satisfies FDT balance with the 4g^2 memory kernel.
+    """
     k1, k2 = jax.random.split(key)
     
-    # Phenomenological ZPE Scaling
-    # lambda_zpe = 1.0 is the exact mathematical derivation (Causes ZPE Leakage)
-    
+    # 1. Transient ring (phi_hom)
     radius = jnp.sqrt(0.5) 
     phase = jax.random.uniform(k1, minval=0, maxval=2*jnp.pi)
     alpha_0 = radius * jnp.exp(1j * phase)
-    phi_hom = (1/jnp.sqrt(3))*2.0*jnp.real(alpha_0 * jnp.exp(-(1j*omega_0 + 0.5*kappa) * t_grid))
+    # Factor of 2.0 makes variance(phi_hom) = 1.0 at t=0
+    phi_hom = 2.0 * jnp.real(alpha_0 * jnp.exp(-(1j*omega_0 + 0.5*kappa) * t_grid))
     
+    # 2. Continuous Bath (phi_noise)
     transfer_matrix = setup_noise_parameters(t_grid, omega_0, kappa, kBT)
     phi_noise_traj = generate_noise_fast(k2, transfer_matrix)[:, 0] 
     
-    # We apply the scaling here: lambda_zpe * (2g)
-    xi_total_x = 2.0*g*(phi_hom + phi_noise_traj)
-    
+    # 3. Total Fluctuating Field (Eq. 22)
+    # REMOVED GEOMETRIC FACTOR. Using pure 2*g from notes.
+    xi_total_x = -2.0 * g * (phi_hom + phi_noise_traj)
     return jnp.zeros((t_grid.shape[0], 3)).at[:, 0].set(xi_total_x)
 
 
 def compute_memory_kernel(tau_grid, omega_0, kappa, g=1.0):
     """
-    Eq. (23) scaled by lambda_zpe**2 to maintain the FDT and correct the Lamb Shift.
+    Theoretical Memory Kernel: 4 * g^2 * exp(-kappa*t/2) * sin(w0*t)
+    Matches Eq. (23) and (21) in the notes[cite: 80, 86].
     """
-    # The original kernel has a factor of 4. We scale it by lambda_zpe squared.
-    gamma_kernel = 4.0*jnp.exp(-0.5 * kappa * tau_grid) * jnp.sin(omega_0 * tau_grid)
-    return (g**2)*gamma_kernel
+    # Factor of 4 is absorbed from the Green's function derivation 
+    gamma_kernel = 4.0 * jnp.exp(-0.5 * kappa * tau_grid) * jnp.sin(omega_0 * tau_grid)
+    return (g**2) * gamma_kernel
 
 
 @jax.jit
