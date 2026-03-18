@@ -1,29 +1,25 @@
 import numpy as np
 from qutip import *
 
-def solve_dynamics_thermal(Bx, By, Bz, wa, g, kappa, kBT, times, rho0, N=15):
-    # 1. Operators
+def solve_dynamics_vacuum(Bx, By, Bz, wa, g, kappa, times, rho0, N=15):
+    """
+    Solves the Master Equation for T=0.
+    Aligned with the derivation: (d/dt + i*wa + kappa/2)a = -i * g * sx
+    """
+    # 1. Operators in the Composite Hilbert Space
     a = tensor(qeye(2), destroy(N))
     sx, sy, sz = tensor(sigmax(), qeye(N)), tensor(sigmay(), qeye(N)), tensor(sigmaz(), qeye(N))
     
-    # 2. Hamiltonian (Note the -0.5 sign to match your analytical notes exactly!)
-    H = 0.5*(Bx*sx + By*sy + Bz*sz) + wa * a.dag() * a + g * sx * (a + a.dag())
+    # 2. Hamiltonian Construction
+    H_spin = 0.5 * (Bx * sx + By * sy + Bz * sz)
+    H_boson = wa * a.dag() * a
+    H_int = g * sx * (a + a.dag())
     
-    # 3. Thermal Bath Calculations
-    if kBT == 0.0:
-        n_th = 0.0
-    else:
-        # Bose-Einstein distribution for thermal photons
-        n_th = 1.0 / (np.exp(wa / kBT) - 1.0)
-        
-    # 4. Thermal Collapse Operators (Detailed Balance)
-    c_decay = np.sqrt(kappa * (1.0 + n_th)) * a      # Spontaneous + Stimulated Emission
-    c_pump  = np.sqrt(kappa * n_th) * a.dag()        # Thermal Absorption
+    H = H_spin + H_boson + H_int
     
-    c_ops = [c_decay, c_pump]
-    
-    # 6. Solve Master Equation
-    result = mesolve(H, rho0, times, c_ops, [sx, sy, sz, a.dag()*a])
+    c_ops = [np.sqrt(kappa) * a]
+    e_ops = [sx, sy, sz, a.dag() * a]
+    result = mesolve(H, rho0, times, c_ops, e_ops)
     
     return result
 
