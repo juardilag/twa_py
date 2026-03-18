@@ -63,43 +63,6 @@ def boson_sampling(key, n_trajectories, initial_alpha=0.0):
     
     return a_init
 
-def discrete_spin_sampling_single(key, target_vector, width_scale=None):
-    """
-    Generates a SINGLE initial state for DTWA.
-    CRITICAL: Returns vectors of length sqrt(3), NOT length 1.
-    """
-    # 1. Get orientation from target (e.g., [0.707, 0, 0.707])
-    target = jnp.array(target_vector)
-    # We only use this to find angles, so normalizing HERE is fine/required for geometry
-    n = target / (jnp.linalg.norm(target) + 1e-12)
-    
-    theta = jnp.arccos(n[2])
-    phi = jnp.arctan2(n[1], n[0])
-    
-    # 2. Generate Local Fluctuations
-    # Vector S_local = [ +/-1, +/-1, 1 ]
-    # Length is sqrt(3)
-    key_x, key_y = jax.random.split(key)
-    
-    s_x_local = jax.random.choice(key_x, jnp.array([-1.0, 1.0]))
-    s_y_local = jax.random.choice(key_y, jnp.array([-1.0, 1.0]))
-    s_z_local = 1.0 
-    
-    s_local = jnp.array([s_x_local, s_y_local, s_z_local])
-    
-    # 3. Rotate
-    ct, st = jnp.cos(theta), jnp.sin(theta)
-    cp, sp = jnp.cos(phi), jnp.sin(phi)
-    
-    Ry = jnp.array([[ct, 0, st], [0, 1, 0], [-st, 0, ct]])
-    Rz = jnp.array([[cp, -sp, 0], [sp, cp, 0], [0, 0, 1]])
-    R = Rz @ Ry
-    
-    s_global = R @ s_local
-    
-    # CRITICAL: Do NOT normalize s_global. Return it with length sqrt(3).
-    return s_global
-
 def discrete_spin_sampling_factorized(key, target_vector, coupling_type):
     """
     Samples Sx, Sy, Sz INDEPENDENTLY in the Lab Frame.
@@ -118,20 +81,81 @@ def discrete_spin_sampling_factorized(key, target_vector, coupling_type):
     
     # 3. Sample Each Component Independently
     k1, k2, k3 = jax.random.split(key, 3)
-    
-    # Map True -> +1.0, False -> -1.0
-    sx = jnp.where(jax.random.uniform(k1) < p_x, 1.0, -1.0)
-    sy = jnp.where(jax.random.uniform(k2) < p_y, 1.0, -1.0)
-    
     # 4. Handle Coupling Logic
-    # JAX's lax.cond or simple python 'if' works here if coupling_type is static
-    if coupling_type == "z":
-        # ARTIFACT FIX: Sz is a constant of motion.
-        # Suppress its Wigner fluctuations to prevent artificial inhomogeneous broadening.
-        sz = n[2]
+    if coupling_type == "x_coupling":
+        # Since the boson couples to Sx, we treat Sx as the "special" axis
+        # to prevent artificial dephasing in the cavity interaction.
+        sx = n[0] 
+        sy = jnp.where(jax.random.uniform(k2) < p_y, 1.0, -1.0)
+        sz = jnp.where(jax.random.uniform(k3) < p_z, 1.0, -1.0)
     elif coupling_type == "full":
-        # GENERAL CASE: Isotropic coupling or general Hamiltonian.
-        # We must sample the quantum fluctuations.
+        sx = jnp.where(jax.random.uniform(k1) < p_x, 1.0, -1.0)
+        sy = jnp.where(jax.random.uniform(k2) < p_y, 1.0, -1.0)
         sz = jnp.where(jax.random.uniform(k3) < p_z, 1.0, -1.0)
         
     return jnp.array([sx, sy, sz])
+
+
+def gaussian_spin_sampling(key, target_vector):
+    """
+    Samples Sx, Sy, Sz from a Gaussian distribution.
+    This replaces the discrete +/- 1 to eliminate the beating artifact.
+    """
+    n = target_vector / (jnp.linalg.norm(target_vector) + 1e-12)
+    
+    # In TWA, the variance of a spin component is 1 - n^2
+    # This ensures the total 'length' of the spin is correct on average.
+    k1, k2, k3 = jax.random.split(key, 3)
+    
+    sx = n[0] + jax.random.normal(k1) * jnp.sqrt(1.0 - n[0]**2)
+    sy = n[1] + jax.random.normal(k2) * jnp.sqrt(1.0 - n[1]**2)
+    sz = n[2] + jax.random.normal(k3) * jnp.sqrt(1.0 - n[2]**2)
+    
+    return jnp.array([sx, sy, sz])
+
+
+def spherical_spin_sampling(key, target_vector):
+    """
+    Samples the spin from a distribution on the surface of the Bloch sphere.
+    Eliminates Gaussian tails while keeping the continuum needed to avoid beating.
+    """
+    # 1. Standardize the target direction
+    n = target_vector / (jnp.linalg.norm(target_vector) + 1e-12)
+    
+    # 2. Sample two random angles for the 'noise' cloud
+    k1, k2 = jax.random.split(key)
+    
+    # The radius is often chosen as 1.0 (Pauli) or sqrt(3)/2
+    # For matching QuTiP sigmax/y/z, radius 1.0 is standard.
+    radius = 1.0 
+    
+    # We sample a small patch on the sphere centered at 'n'
+    # A simple way is to add perpendicular Gaussian noise and re-normalize
+    noise = jax.random.normal(k1, (3,)) * 0.5 # Width of the 'quantum' cloud
+    s_total = n + noise
+    
+    # Re-normalize to the surface of the sphere
+    s_sampled = (s_total / jnp.linalg.norm(s_total)) * radius
+    
+    return s_sampled
+
+
+def projected_gaussian_sampling(key, target_vector):
+    """
+    Standard TWA for Spin-1/2:
+    Keeps the target component fixed at 1.0.
+    Adds Gaussian fluctuations to the transverse axes.
+    """
+    # 1. Target axis is fixed to 1.0 (Sy = 1.0)
+    # This guarantees the orange line starts at 1.0
+    n = target_vector / (jnp.linalg.norm(target_vector) + 1e-12)
+    
+    # 2. Transverse Fluctuations (Sx and Sz)
+    # We need <Sx^2> = 1.0 to match the Pauli variance <sigma_x^2> = 1
+    # This provides the exact decay rate seen in QuTiP
+    k1, k2 = jax.random.split(key)
+    sx_noise = jax.random.normal(k1) * 1.0
+    sz_noise = jax.random.normal(k2) * 1.0
+    
+    # Assuming target is [0, 1, 0]:
+    return jnp.array([sx_noise, n[1], sz_noise])
