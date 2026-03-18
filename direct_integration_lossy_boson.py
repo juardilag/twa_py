@@ -1,54 +1,17 @@
 import jax.numpy as jnp
 import jax
-from initial_samplings import discrete_spin_sampling_factorized
+from initial_samplings import discrete_spin_sampling_factorized, gaussian_spin_sampling, spherical_spin_sampling, projected_gaussian_sampling
 from tqdm.auto import tqdm
 
-def setup_noise_parameters(t_grid, omega_0, kappa, kBT):
-    """
-    Sets up the noise transfer matrix to generate the pure normalized field phi_noise.
-    Removed the 'g' parameter to prevent double-scaling.
-    """
-    num_omega = 10_000 
-    omega_grid = jnp.linspace(omega_0 - 20*kappa, omega_0 + 20*kappa, num_omega)
-    d_omega = omega_grid[1] - omega_grid[0]
-    
-    lorentzian = (kappa / (2.0 * jnp.pi)) / ((omega_grid - omega_0)**2 + (kappa/2.0)**2)
-    
-    safe_omega = jnp.maximum(omega_grid, 1e-12)
-    x = safe_omega / (2.0 * kBT)
-    thermal_factor = 1.0 / jnp.tanh(x)
-    
-    # Generate the pure field (a + a_dag) with variance 1 at T=0
-    amplitude = jnp.sqrt(lorentzian * thermal_factor * d_omega) 
-    
-    time_evolution = jnp.exp(-1j * jnp.outer(t_grid, omega_grid))
-    transfer_matrix = time_evolution * amplitude[None, :]
-    
-    return transfer_matrix
-
 @jax.jit
-def generate_complete_noise(key, t_grid, omega_0, kappa, g, kBT):
-    """
-    Theoretical Noise Implementation: Xi(t) = -2g * phi_fluct(t)
-    Satisfies FDT balance with the 4g^2 memory kernel.
-    """
-    k1, k2 = jax.random.split(key)
-    
-    # 1. Transient ring (phi_hom)
-    radius = jnp.sqrt(0.5) 
-    phase = jax.random.uniform(k1, minval=0, maxval=2*jnp.pi)
-    alpha_0 = radius * jnp.exp(1j * phase)
-    # Factor of 2.0 makes variance(phi_hom) = 1.0 at t=0
-    phi_hom = 2.0 * jnp.real(alpha_0 * jnp.exp(-(1j*omega_0 + 0.5*kappa) * t_grid))
-    
-    # 2. Continuous Bath (phi_noise)
-    transfer_matrix = setup_noise_parameters(t_grid, omega_0, kappa, kBT)
-    phi_noise_traj = generate_noise_fast(k2, transfer_matrix)[:, 0] 
-    
-    # 3. Total Fluctuating Field (Eq. 22)
-    # REMOVED GEOMETRIC FACTOR. Using pure 2*g from notes.
-    xi_total_x = 2.0 * g * (phi_hom + phi_noise_traj)
-    return jnp.zeros((t_grid.shape[0], 3)).at[:, 0].set(xi_total_x)
+def generate_complete_noise(key, t_grid, omega_0, kappa, g):
+    # Fix: Use sqrt(0.25) for correct vacuum variance (0.5 total)
+    k1, _ = jax.random.split(key)
+    standard_normal = jax.random.normal(k1, (2,)) 
+    alpha_0 = (standard_normal[0] + 1j * standard_normal[1]) * jnp.sqrt(0.25)
+
+    phi_noise = 2.0 * jnp.real(alpha_0 * jnp.exp(-(1j * omega_0 + 0.5 * kappa) * t_grid))
+    return jnp.zeros((t_grid.shape[0], 3)).at[:, 0].set(2.0 * g * phi_noise)
 
 
 def compute_memory_kernel(tau_grid, omega_0, kappa, g=1.0):
@@ -80,7 +43,7 @@ def generate_noise_fast(key, transfer_matrix):
     noise_A = jax.random.normal(key_a, (num_omega,))
     noise_B = jax.random.normal(key_b, (num_omega,))
     
-    Z_stoch = (noise_A + 1j * noise_B)/jnp.sqrt(2.0)
+    Z_stoch = (noise_A + 1j * noise_B)
 
     # Project frequencies into the time domain
     # result shape: (num_steps,)
@@ -95,26 +58,18 @@ def generate_noise_fast(key, transfer_matrix):
 
 def compute_effective_field(S_state, history_array, step_idx, gamma_kernel, 
                             noise_traj, B_field, dt):
-    """
-    Total effective field in the Lab Frame.
-    """
-    # 1. Memory Integral (Dissipation)
+    # 1. Memory Integral (Now with correct Dissipative sign)
     N = history_array.shape[0]
     indices = jnp.arange(N)
     lag_indices = step_idx - indices
-    
-    # Causal kernel slice
     gamma_causal = jnp.where(lag_indices > 0, 
                              jnp.take(gamma_kernel, lag_indices, mode='fill', fill_value=0.0), 
                              0.0)
 
-    # Standard dissipative back-action
+    # FIX: Change 1.0 to -1.0 to match Eq. 10 in your notes
     memory_x = -1.0 * (jnp.dot(gamma_causal, history_array[:, 0]) * dt)
     
-    # 2. Fluctuating Field (Noise)
     xi_t = noise_traj[jnp.clip(step_idx, 0, noise_traj.shape[0]-1)]
-    
-    # 3. Final Field
     eff_field_x = B_field[0] + xi_t[0] + memory_x
     
     return jnp.array([eff_field_x, B_field[1], B_field[2]])
@@ -161,7 +116,7 @@ def heun_step_non_markovian(state_trajectory, step_idx, noise_traj, gamma_kernel
     return new_state_traj, S_next
 
 
-def run_twa_bundle(keys, t_grid, omega_0, kappa, kBT, B_field, g, initial_direction, batch_size=1000):
+def run_twa_bundle(keys, t_grid, omega_0, kappa, B_field, g, initial_direction, coupling_type, batch_size=1000):
     """
     Manages the DTWA simulation by parallelizing trajectories across JAX devices.
     """
@@ -179,11 +134,11 @@ def run_twa_bundle(keys, t_grid, omega_0, kappa, kBT, B_field, g, initial_direct
         k_samp, k_hom, k_bath = jax.random.split(key, 3)
         
         # A. Sample Initial State (Discrete Spin Sampling)
-        s0 = discrete_spin_sampling_factorized(k_samp, initial_direction, coupling_type='full')
+        s0 = discrete_spin_sampling_factorized(k_samp, initial_direction, coupling_type)
         
         # B. Generate Noise (Xi(t) restricted to the x-axis)
         # 1. Transient noise from the initial state of the cavity
-        hom_noise_traj = generate_complete_noise(k_hom, t_grid, omega_0, kappa, g, kBT)
+        hom_noise_traj = generate_complete_noise(k_hom, t_grid, omega_0, kappa, g)
         
         # 2. Continuous vacuum/thermal fluctuations from the bath
         #bath_noise_traj = generate_noise_fast(k_bath, noise_transfer_matrix)
