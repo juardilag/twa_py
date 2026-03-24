@@ -1,6 +1,7 @@
 import jax.numpy as jnp
 import jax
-from initial_samplings import discrete_spin_sampling_factorized, gaussian_spin_sampling, spherical_spin_sampling, projected_gaussian_sampling
+from initial_samplings import discrete_spin_sampling_factorized
+from lossy_boson import solve_dynamics_vacuum, get_initial_state
 from tqdm.auto import tqdm
 
 @jax.jit
@@ -178,3 +179,71 @@ def run_twa_bundle(keys, t_grid, omega_0, kappa, B_field, g, initial_direction, 
         
     # 6. Final DTWA Average Result
     return total_sum / n_total
+
+
+def run_normalized_simulation(g_ratio, kappa_ratio, B_field_unit, v_init, tau_max, omega_0, num_steps, N=30):
+    """
+    Runs both QuTiP and TWA simulations using normalized parameters.
+    
+    Returns:
+        dict: Contains t_grid, QuTiP expectation values, and TWA results.
+    """
+    # 1. Scale parameters relative to omega_0
+    kappa = kappa_ratio * omega_0
+    g = g_ratio * omega_0
+    # B_field input is treated as the relative magnitude/direction
+    B_scaled = jnp.array(B_field_unit) * omega_0 
+    
+    # 2. Setup Time Grid (Dimensionless Scaling)
+    t_max = tau_max / omega_0
+    t_grid = jnp.linspace(0, t_max, num_steps)
+    
+    # 3. Initial State
+    rho0 = get_initial_state(v_init, N)
+    
+    # 4. Run QuTiP Solver
+    res = solve_dynamics_vacuum(
+        Bx=B_scaled[0], 
+        By=B_scaled[1], 
+        Bz=B_scaled[2], 
+        wa=omega_0, 
+        g=g, 
+        kappa=kappa, 
+        times=t_grid, 
+        rho0=rho0, 
+        N=N
+    )
+    
+    # 5. Run TWA Simulation
+    n_trajectories = 10_000 
+    master_key = jax.random.PRNGKey(42)
+    keys = jax.random.split(master_key, n_trajectories)
+
+    twa_results_raw = run_twa_bundle(
+        keys=keys, 
+        t_grid=t_grid, 
+        omega_0=omega_0, 
+        kappa=kappa, 
+        B_field=B_scaled, 
+        g=g, 
+        initial_direction=jnp.array(v_init),
+        coupling_type='full',
+        batch_size=5000
+    )
+
+    # 6. Organize and Return Data
+    return {
+        "t_grid": t_grid,
+        "omega_0": omega_0,
+        "qutip": {
+            "expect_x": res.expect[0],
+            "expect_y": res.expect[1],
+            "expect_z": res.expect[2],
+            "boson_num": res.expect[3]
+        },
+        "twa": {
+            "expect_x": twa_results_raw[:, 0],
+            "expect_y": twa_results_raw[:, 1],
+            "expect_z": twa_results_raw[:, 2]
+        }
+    }
