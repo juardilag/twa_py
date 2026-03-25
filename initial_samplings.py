@@ -63,32 +63,25 @@ def boson_sampling(key, n_trajectories, initial_alpha=0.0):
     
     return a_init
 
+@jax.jit(static_argnames=('coupling_type',))
 def discrete_spin_sampling_factorized(key, target_vector, coupling_type):
-    """
-    Samples Sx, Sy, Sz INDEPENDENTLY in the Lab Frame.
-    Constrains values to be strictly +1 or -1 for standard DTWA.
-    
-    This incorporates the artifact fix for Pure Dephasing ("z" coupling).
-    """
-    # 1. Normalize Target Vector (Bloch Vector components u, v, w)
+    # ... your existing logic ...
     n = target_vector / (jnp.linalg.norm(target_vector) + 1e-12)
     
-    # 2. Calculate Probabilities for +1
-    #
-    p_x = jnp.clip((1.0 + n[0]) / 2.0, 0.0, 1.0)
+    # Probabilities
     p_y = jnp.clip((1.0 + n[1]) / 2.0, 0.0, 1.0)
     p_z = jnp.clip((1.0 + n[2]) / 2.0, 0.0, 1.0)
     
-    # 3. Sample Each Component Independently
     k1, k2, k3 = jax.random.split(key, 3)
-    # 4. Handle Coupling Logic
+    
     if coupling_type == "x_coupling":
-        # Since the boson couples to Sx, we treat Sx as the "special" axis
-        # to prevent artificial dephasing in the cavity interaction.
+        # Deterministic projection logic
         sx = n[0] 
         sy = jnp.where(jax.random.uniform(k2) < p_y, 1.0, -1.0)
         sz = jnp.where(jax.random.uniform(k3) < p_z, 1.0, -1.0)
-    elif coupling_type == "full":
+    else:
+        # Full discrete logic
+        p_x = jnp.clip((1.0 + n[0]) / 2.0, 0.0, 1.0)
         sx = jnp.where(jax.random.uniform(k1) < p_x, 1.0, -1.0)
         sy = jnp.where(jax.random.uniform(k2) < p_y, 1.0, -1.0)
         sz = jnp.where(jax.random.uniform(k3) < p_z, 1.0, -1.0)

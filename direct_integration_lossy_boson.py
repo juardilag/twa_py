@@ -181,7 +181,7 @@ def run_twa_bundle(keys, t_grid, omega_0, kappa, B_field, g, initial_direction, 
     return total_sum / n_total
 
 
-def run_normalized_simulation(g_ratio, kappa_ratio, B_field_unit, v_init, tau_max, omega_0, num_steps, N=30):
+def run_normalized_simulation(g_ratio, kappa_ratio, B_field_unit, v_init, tau_max, omega_0, num_steps, N=30, coupling = 'full'):
     """
     Runs both QuTiP and TWA simulations using normalized parameters.
     
@@ -227,7 +227,7 @@ def run_normalized_simulation(g_ratio, kappa_ratio, B_field_unit, v_init, tau_ma
         B_field=B_scaled, 
         g=g, 
         initial_direction=jnp.array(v_init),
-        coupling_type='full',
+        coupling_type=coupling,
         batch_size=5000
     )
 
