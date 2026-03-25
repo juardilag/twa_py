@@ -152,3 +152,37 @@ def projected_gaussian_sampling(key, target_vector):
     
     # Assuming target is [0, 1, 0]:
     return jnp.array([sx_noise, n[1], sz_noise])
+
+@jax.jit
+def sample_coherent_discrete_rings(
+    key: jax.Array,
+    alpha_mean: complex,
+    use_wigner_radius: bool = True 
+) -> complex:
+    """
+    Samples a 'Quantized' Coherent state for DTWA.
+    Maps the Poissonian nature of light to discrete Fock-space rings.
+    """
+    k1, k2 = jax.random.split(key)
+    
+    # 1. Mean photon number
+    mean_n = jnp.abs(alpha_mean)**2
+    
+    # 2. Sample Integer Photon Number n ~ Poisson(|alpha|^2)
+    # This captures the 'Shot Noise' of the coherent state
+    n_integer = jax.random.poisson(k1, mean_n)
+    
+    # 3. Calculate Radius (Wigner shift)
+    # The +0.5 is vital for the Fluctuation-Dissipation Theorem balance
+    offset = jnp.where(use_wigner_radius, 0.5, 0.0)
+    radius = jnp.sqrt(n_integer + offset)
+    
+    # 4. Sample Random Phase
+    # This maintains the U(1) symmetry of the state
+    phase = jax.random.uniform(k2, minval=0, maxval=2*jnp.pi)
+    
+    # 5. Construct Complex Alpha
+    # We shift the phase by the angle of alpha_mean to align the 'blob'
+    alpha_sample = radius * jnp.exp(1j * (phase + jnp.angle(alpha_mean)))
+    
+    return alpha_sample
