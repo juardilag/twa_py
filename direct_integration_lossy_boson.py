@@ -1,18 +1,31 @@
 import jax.numpy as jnp
 import jax
-from initial_samplings import discrete_spin_sampling_factorized
+from initial_samplings import discrete_spin_sampling_factorized, sample_coherent_discrete_rings
 from lossy_boson import solve_dynamics_vacuum, get_initial_state
 from tqdm.auto import tqdm
 
 @jax.jit
-def generate_complete_noise(key, t_grid, omega_0, kappa, g):
-    # Fix: Use sqrt(0.25) for correct vacuum variance (0.5 total)
-    k1, _ = jax.random.split(key)
-    standard_normal = jax.random.normal(k1, (2,)) 
-    alpha_0 = (standard_normal[0] + 1j * standard_normal[1]) * jnp.sqrt(0.25)
+def generate_complete_noise(key, t_grid, omega_0, kappa, g, n_photons_initial=0.0):
+    """
+    Genera la trayectoria de ruido Xi(t) = 2g * phi_noise(t).
+    Ahora utiliza el muestreo de anillos discretos para el estado inicial de la cavidad.
+    """
+    # Obtenemos el alpha_0 cuantizado
+    alpha_0 = sample_coherent_discrete_rings(key, n_photons_initial)
 
-    phi_noise = 2.0 * jnp.real(alpha_0 * jnp.exp(-(1j * omega_0 + 0.5 * kappa) * t_grid))
-    return jnp.zeros((t_grid.shape[0], 3)).at[:, 0].set(2.0 * g * phi_noise)
+    # Evolución temporal del operador de aniquilación (visto como variable compleja)
+    # alpha(t) = alpha_0 * exp(-(i*w0 + kappa/2)*t)
+    decay_envelope = jnp.exp(-(1j * omega_0 + 0.5 * kappa) * t_grid)
+    alpha_t = alpha_0 * decay_envelope
+    
+    # El campo real de la cavidad es phi = a + a_dag -> 2 * Re(alpha)
+    phi_noise = 2.0 * jnp.real(alpha_t)
+    
+    # La fuerza estocástica sobre el espín es Xi = 2 * g * phi
+    xi_x = 2.0 * g * phi_noise
+    
+    # Retornamos el vector de ruido [Xi_x, 0, 0]
+    return jnp.zeros((t_grid.shape[0], 3)).at[:, 0].set(xi_x)
 
 
 def compute_memory_kernel(tau_grid, omega_0, kappa, g=1.0):
@@ -23,38 +36,6 @@ def compute_memory_kernel(tau_grid, omega_0, kappa, g=1.0):
     # Factor of 4 is absorbed from the Green's function derivation 
     gamma_kernel = 4.0 * jnp.exp(-0.5 * kappa * tau_grid) * jnp.sin(omega_0 * tau_grid)
     return (g**2) * gamma_kernel
-
-
-@jax.jit
-def generate_noise_fast(key, transfer_matrix):
-    """
-    Generates the stochastic noise trajectory Xi(t).
-    
-    In this model, the single boson exclusively couples to sigma_x, 
-    so the total fluctuating noise Xi(t) only drives the x-component.
-    """
-    num_omega = transfer_matrix.shape[1]
-    num_steps = transfer_matrix.shape[0]
-    
-    # We only need noise for the X-component (column 0) 
-    # as per Eq. (22): Xi(t) = -2g * phi_fluct(t) * x_hat
-    key_a, key_b = jax.random.split(key)
-    
-    # Sampling standard normal variables for the spectral decomposition
-    noise_A = jax.random.normal(key_a, (num_omega,))
-    noise_B = jax.random.normal(key_b, (num_omega,))
-    
-    Z_stoch = (noise_A + 1j * noise_B)
-
-    # Project frequencies into the time domain
-    # result shape: (num_steps,)
-    xi_x = jnp.real(transfer_matrix @ Z_stoch)
-    
-    # Construct 3D noise vector: [Xi_x(t), 0, 0]
-    # Based on Eq. (22) in your notes
-    xi_t = jnp.zeros((num_steps, 3)).at[:, 0].set(xi_x)
-    
-    return xi_t
 
 
 def compute_effective_field(S_state, history_array, step_idx, gamma_kernel, 
@@ -117,7 +98,7 @@ def heun_step_non_markovian(state_trajectory, step_idx, noise_traj, gamma_kernel
     return new_state_traj, S_next
 
 
-def run_twa_bundle(keys, t_grid, omega_0, kappa, B_field, g, initial_direction, coupling_type, batch_size=1000):
+def run_twa_bundle(keys, t_grid, omega_0, kappa, B_field, g, n_photons_initial, initial_direction, coupling_type, batch_size=1000):
     """
     Manages the DTWA simulation by parallelizing trajectories across JAX devices.
     """
@@ -139,7 +120,7 @@ def run_twa_bundle(keys, t_grid, omega_0, kappa, B_field, g, initial_direction, 
         
         # B. Generate Noise (Xi(t) restricted to the x-axis)
         # 1. Transient noise from the initial state of the cavity
-        hom_noise_traj = generate_complete_noise(k_hom, t_grid, omega_0, kappa, g)
+        hom_noise_traj = generate_complete_noise(k_hom, t_grid, omega_0, kappa, g, n_photons_initial)
         
         # 2. Continuous vacuum/thermal fluctuations from the bath
         #bath_noise_traj = generate_noise_fast(k_bath, noise_transfer_matrix)
@@ -181,7 +162,7 @@ def run_twa_bundle(keys, t_grid, omega_0, kappa, B_field, g, initial_direction, 
     return total_sum / n_total
 
 
-def run_normalized_simulation(g_ratio, kappa_ratio, B_field_unit, v_init, tau_max, omega_0, num_steps, N=30, coupling = 'full'):
+def run_normalized_simulation(g_ratio, kappa_ratio, B_field_unit, v_init, tau_max, omega_0, n_photons_initial, num_steps, N=30, coupling = 'full'):
     """
     Runs both QuTiP and TWA simulations using normalized parameters.
     
@@ -225,6 +206,7 @@ def run_normalized_simulation(g_ratio, kappa_ratio, B_field_unit, v_init, tau_ma
         omega_0=omega_0, 
         kappa=kappa, 
         B_field=B_scaled, 
+        n_photons_initial = n_photons_initial,
         g=g, 
         initial_direction=jnp.array(v_init),
         coupling_type=coupling,
