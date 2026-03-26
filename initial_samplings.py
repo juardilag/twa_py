@@ -63,95 +63,35 @@ def boson_sampling(key, n_trajectories, initial_alpha=0.0):
     
     return a_init
 
-@jax.jit(static_argnames=('coupling_type',))
-def discrete_spin_sampling_factorized(key, target_vector, coupling_type):
-    # ... your existing logic ...
-    n = target_vector / (jnp.linalg.norm(target_vector) + 1e-12)
-    
-    # Probabilities
-    p_y = jnp.clip((1.0 + n[1]) / 2.0, 0.0, 1.0)
-    p_z = jnp.clip((1.0 + n[2]) / 2.0, 0.0, 1.0)
-    
-    k1, k2, k3 = jax.random.split(key, 3)
-    
-    if coupling_type == "x_coupling":
-        # Deterministic projection logic
-        sx = n[0] 
-        sy = jnp.where(jax.random.uniform(k2) < p_y, 1.0, -1.0)
-        sz = jnp.where(jax.random.uniform(k3) < p_z, 1.0, -1.0)
-    else:
-        # Full discrete logic
-        p_x = jnp.clip((1.0 + n[0]) / 2.0, 0.0, 1.0)
-        sx = jnp.where(jax.random.uniform(k1) < p_x, 1.0, -1.0)
-        sy = jnp.where(jax.random.uniform(k2) < p_y, 1.0, -1.0)
-        sz = jnp.where(jax.random.uniform(k3) < p_z, 1.0, -1.0)
-        
-    return jnp.array([sx, sy, sz])
-
-
-def gaussian_spin_sampling(key, target_vector):
+@jax.jit
+def discrete_spin_sampling_factorized(key, initial_direction):
     """
-    Samples Sx, Sy, Sz from a Gaussian distribution.
-    This replaces the discrete +/- 1 to eliminate the beating artifact.
+    Tu lógica original: S(0) = Mean + f1*perp1 + f2*perp2
+    Mantiene el radio sqrt(3). <Sz> empezará en 1.0 sin saltos.
     """
-    n = target_vector / (jnp.linalg.norm(target_vector) + 1e-12)
-    
-    # In TWA, the variance of a spin component is 1 - n^2
-    # This ensures the total 'length' of the spin is correct on average.
-    k1, k2, k3 = jax.random.split(key, 3)
-    
-    sx = n[0] + jax.random.normal(k1) * jnp.sqrt(1.0 - n[0]**2)
-    sy = n[1] + jax.random.normal(k2) * jnp.sqrt(1.0 - n[1]**2)
-    sz = n[2] + jax.random.normal(k3) * jnp.sqrt(1.0 - n[2]**2)
-    
-    return jnp.array([sx, sy, sz])
-
-
-def spherical_spin_sampling(key, target_vector):
-    """
-    Samples the spin from a distribution on the surface of the Bloch sphere.
-    Eliminates Gaussian tails while keeping the continuum needed to avoid beating.
-    """
-    # 1. Standardize the target direction
-    n = target_vector / (jnp.linalg.norm(target_vector) + 1e-12)
-    
-    # 2. Sample two random angles for the 'noise' cloud
     k1, k2 = jax.random.split(key)
     
-    # The radius is often chosen as 1.0 (Pauli) or sqrt(3)/2
-    # For matching QuTiP sigmax/y/z, radius 1.0 is standard.
-    radius = 1.0 
+    # 1. Dirección media
+    mean_vec = initial_direction / (jnp.linalg.norm(initial_direction) + 1e-12)
     
-    # We sample a small patch on the sphere centered at 'n'
-    # A simple way is to add perpendicular Gaussian noise and re-normalize
-    noise = jax.random.normal(k1, (3,)) * 0.5 # Width of the 'quantum' cloud
-    s_total = n + noise
+    # 2. Gram-Schmidt para encontrar ejes perpendiculares
+    # Usamos jnp.where en lugar de if para que sea compatible con JIT
+    v = jnp.where(jnp.abs(mean_vec[0]) < 0.9, 
+                  jnp.array([1.0, 0.0, 0.0]), 
+                  jnp.array([0.0, 1.0, 0.0]))
     
-    # Re-normalize to the surface of the sphere
-    s_sampled = (s_total / jnp.linalg.norm(s_total)) * radius
+    perp1 = jnp.cross(mean_vec, v)
+    perp1 = perp1 / (jnp.linalg.norm(perp1) + 1e-12)
+    perp2 = jnp.cross(mean_vec, perp1)
     
-    return s_sampled
-
-
-def projected_gaussian_sampling(key, target_vector):
-    """
-    Standard TWA for Spin-1/2:
-    Keeps the target component fixed at 1.0.
-    Adds Gaussian fluctuations to the transverse axes.
-    """
-    # 1. Target axis is fixed to 1.0 (Sy = 1.0)
-    # This guarantees the orange line starts at 1.0
-    n = target_vector / (jnp.linalg.norm(target_vector) + 1e-12)
+    # 3. Fluctuaciones discretas +/- 1
+    f1 = 2.0 * jax.random.bernoulli(k1, p=0.5) - 1.0
+    f2 = 2.0 * jax.random.bernoulli(k2, p=0.5) - 1.0
     
-    # 2. Transverse Fluctuations (Sx and Sz)
-    # We need <Sx^2> = 1.0 to match the Pauli variance <sigma_x^2> = 1
-    # This provides the exact decay rate seen in QuTiP
-    k1, k2 = jax.random.split(key)
-    sx_noise = jax.random.normal(k1) * 1.0
-    sz_noise = jax.random.normal(k2) * 1.0
+    # 4. Construcción del espín (Radio = sqrt(3))
+    s_init = mean_vec + f1 * perp1 + f2 * perp2
     
-    # Assuming target is [0, 1, 0]:
-    return jnp.array([sx_noise, n[1], sz_noise])
+    return s_init
 
 @jax.jit
 def sample_coherent_discrete_rings(
