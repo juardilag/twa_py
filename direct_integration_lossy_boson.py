@@ -2,7 +2,7 @@ import jax.numpy as jnp
 import jax
 from initial_samplings import discrete_spin_sampling_factorized, sample_coherent_discrete_rings
 from lossy_boson import solve_dynamics_vacuum, get_initial_state
-from tqdm.auto import tqdm
+from tqdm import tqdm
 
 @jax.jit
 def generate_complete_noise(key, t_grid, omega_0, kappa, g, n_photons_initial=0.0):
