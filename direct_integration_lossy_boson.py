@@ -20,17 +20,23 @@ def generate_complete_noise(key, t_grid, omega_0, kappa, g, n_photons_initial=0.
     alpha_0 = mean_field + (vacuum_fluc_re + 1j * vacuum_fluc_im)
     transient_alpha = alpha_0 * jnp.exp(-(1j * omega_0 + 0.5 * kappa) * t_grid)
     
-    # 2. Ruido Estacionario del Baño (Wigner Vacuum)
-    dw_re = jax.random.normal(k_re, shape=t_grid.shape) * jnp.sqrt(0.5 * dt)
-    dw_im = jax.random.normal(k_im, shape=t_grid.shape) * jnp.sqrt(0.5 * dt)
-    white_noise = dw_re + 1j * dw_im
+    # 2. Ruido Estacionario del Baño (EXACT Ornstein-Uhlenbeck Integrator)
     
-    # EOM de la cavidad para el baño
-    def cavity_step(alpha_prev, dW):
-        d_alpha = -(1j * omega_0 + 0.5 * kappa) * alpha_prev * dt + jnp.sqrt(0.5 * kappa) * dW
-        return alpha_prev + d_alpha, alpha_prev + d_alpha
+    # Pre-calculate the exact analytical decay and variance for the time step
+    exact_decay = jnp.exp(-(1j * omega_0 + 0.5 * kappa) * dt)
+    exact_variance = 0.25*(1.0 - jnp.exp(-kappa * dt)) 
+    
+    # Generate the noise increments using the exact variance
+    dw_re = jax.random.normal(k_re, shape=t_grid.shape) * jnp.sqrt(exact_variance)
+    dw_im = jax.random.normal(k_im, shape=t_grid.shape) * jnp.sqrt(exact_variance)
+    exact_noise_increments = dw_re + 1j * dw_im
+    
+    # The exact, unconditionally stable EOM step
+    def exact_cavity_step(alpha_prev, noise_inc):
+        alpha_next = alpha_prev * exact_decay + noise_inc
+        return alpha_next, alpha_next
 
-    _, bath_alpha = jax.lax.scan(cavity_step, 0j, white_noise)
+    _, bath_alpha = jax.lax.scan(exact_cavity_step, 0j, exact_noise_increments)
     
     # 3. Campo Total de la Cavidad
     alpha_total = transient_alpha + bath_alpha
@@ -79,33 +85,31 @@ def compute_effective_field(S_state, history_array, step_idx, gamma_kernel,
 def heun_step_non_markovian(state_trajectory, step_idx, noise_traj, gamma_kernel, B_field, dt):
     curr_idx = step_idx - 1
     S_curr = state_trajectory[curr_idx]
-    
-    def get_rotation_params(S, idx, traj):
-        B_eff = compute_effective_field(S, traj, idx, gamma_kernel, noise_traj, B_field, dt)
-        
-        # The 2.0 matching Lindblad/Pauli algebra
-        b_mag = jnp.linalg.norm(B_eff) + 1e-16
-        omega = 2.0 * b_mag 
-        axis = B_eff / b_mag # Strictly unitary axis prevents explosions
-        
-        return axis, omega * dt
 
     # --- PREDICTOR ---
-    axis_p, angle_p = get_rotation_params(S_curr, curr_idx, state_trajectory)
+    B_eff_p = compute_effective_field(S_curr, state_trajectory, curr_idx, gamma_kernel, noise_traj, B_field, dt)
+    b_mag_p = jnp.linalg.norm(B_eff_p) + 1e-16
+    axis_p = B_eff_p / b_mag_p
+    angle_p = 2.0 * b_mag_p * dt
+    
     S_pred = (S_curr * jnp.cos(angle_p) + 
               jnp.cross(axis_p, S_curr) * jnp.sin(angle_p) + 
               axis_p * jnp.dot(axis_p, S_curr) * (1.0 - jnp.cos(angle_p)))
     
     # --- CORRECTOR ---
     traj_with_pred = state_trajectory.at[step_idx].set(S_pred)
-    axis_c, angle_c = get_rotation_params(S_pred, step_idx, traj_with_pred)
+    B_eff_c = compute_effective_field(S_pred, traj_with_pred, step_idx, gamma_kernel, noise_traj, B_field, dt)
     
-    angle_avg = 0.5 * (angle_p + angle_c)
+    # Average the effective magnetic fields directly!
+    B_eff_avg = 0.5 * (B_eff_p + B_eff_c)
+    b_mag_avg = jnp.linalg.norm(B_eff_avg) + 1e-16
+    axis_avg = B_eff_avg / b_mag_avg
+    angle_avg = 2.0 * b_mag_avg * dt
     
     S_next = (S_curr * jnp.cos(angle_avg) + 
-              jnp.cross(axis_p, S_curr) * jnp.sin(angle_avg) + 
-              axis_p * jnp.dot(axis_p, S_curr) * (1.0 - jnp.cos(angle_avg)))
-    
+              jnp.cross(axis_avg, S_curr) * jnp.sin(angle_avg) + 
+              axis_avg * jnp.dot(axis_avg, S_curr) * (1.0 - jnp.cos(angle_avg)))
+              
     return state_trajectory.at[step_idx].set(S_next), S_next
 
 
