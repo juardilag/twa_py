@@ -7,30 +7,36 @@ from tqdm.auto import tqdm
 @jax.jit
 def generate_complete_noise(key, t_grid, omega_0, kappa, g, n_photons_initial=0.0):
     dt = t_grid[1] - t_grid[0]
-    k_init, k_re, k_im = jax.random.split(key, 3)
+    # Necesitamos 4 llaves: 2 para el estado inicial de la cavidad, 2 para el baño
+    k_init_re, k_init_im, k_re, k_im = jax.random.split(key, 4)
     
-    # 1. Ruido Transitorio
-    alpha_0 = sample_coherent_discrete_rings(k_init, n_photons_initial)
+    # 1. Ruido Transitorio (ESTADO COHERENTE CORRECTO)
+    # alpha_0 = Campo Medio + Fluctuaciones del Vacío (Wigner)
+    mean_field = jnp.sqrt(n_photons_initial) # Asume fase 0 (campo coherente real)
+    vacuum_fluc_re = jax.random.normal(k_init_re) * jnp.sqrt(0.5)
+    vacuum_fluc_im = jax.random.normal(k_init_im) * jnp.sqrt(0.5)
+    
+    # El estado inicial es una Gaussiana centrada en el campo medio
+    alpha_0 = mean_field + (vacuum_fluc_re + 1j * vacuum_fluc_im)
     transient_alpha = alpha_0 * jnp.exp(-(1j * omega_0 + 0.5 * kappa) * t_grid)
     
     # 2. Ruido Estacionario del Baño (Wigner Vacuum)
-    # Generamos la parte real e imaginaria del Wiener process
     dw_re = jax.random.normal(k_re, shape=t_grid.shape) * jnp.sqrt(0.5 * dt)
     dw_im = jax.random.normal(k_im, shape=t_grid.shape) * jnp.sqrt(0.5 * dt)
     white_noise = dw_re + 1j * dw_im
     
-    # EL FIX CRÍTICO: jnp.sqrt(0.5 * kappa) para asegurar <|alpha|^2> = 0.5
+    # EOM de la cavidad para el baño
     def cavity_step(alpha_prev, dW):
         d_alpha = -(1j * omega_0 + 0.5 * kappa) * alpha_prev * dt + jnp.sqrt(0.5 * kappa) * dW
         return alpha_prev + d_alpha, alpha_prev + d_alpha
 
     _, bath_alpha = jax.lax.scan(cavity_step, 0j, white_noise)
     
-    # 3. Ruido Total de la Cavidad
+    # 3. Campo Total de la Cavidad
     alpha_total = transient_alpha + bath_alpha
     phi_noise = 2.0 * jnp.real(alpha_total)
     
-    # Xi = 2 * g * phi
+    # Xi = 2 * g * phi (Fuerza sobre el espín)
     xi_x = 2.0 * g * phi_noise
     return jnp.zeros((t_grid.shape[0], 3)).at[:, 0].set(xi_x)
 
