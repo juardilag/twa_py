@@ -163,17 +163,18 @@ def run_twa_bundle(keys, t_grid, omega_0, kappa, B_field, g, n_photons_initial, 
     # If you want it normalized to [-1, 1] for plotting against QuTiP, divide by (n_total * n_spins) outside the function.
     return total_sum / n_total
 
-
-def run_normalized_simulation(g_ratio, kappa_ratio, B_field_unit, v_init, tau_max, omega_0, n_photons_initial, num_steps, N=50, coupling = 'full'):
+def run_normalized_simulation(g_ratio, kappa_ratio, B_field_unit, v_init, tau_max, omega_0, n_photons_initial, num_steps, n_spins=1, N_boson=30, coupling='full'):
     """
-    Runs both QuTiP and TWA simulations using normalized parameters.
+    Runs both QuTiP and DTWA simulations using normalized parameters for N spins.
     
     Returns:
-        dict: Contains t_grid, QuTiP expectation values, and TWA results.
+        dict: Contains t_grid, normalized QuTiP expectation values [-1, 1], 
+              and normalized TWA results [-1, 1].
     """
     # 1. Scale parameters relative to omega_0
     kappa = kappa_ratio * omega_0
     g = g_ratio * omega_0
+    
     # B_field input is treated as the relative magnitude/direction
     B_scaled = jnp.array(B_field_unit) * omega_0 
     
@@ -181,8 +182,8 @@ def run_normalized_simulation(g_ratio, kappa_ratio, B_field_unit, v_init, tau_ma
     t_max = tau_max / omega_0
     t_grid = jnp.linspace(0, t_max, num_steps)
     
-    # 3. Initial State
-    rho0 = get_initial_state(v_init, n_photons_initial, N)
+    # 3. Initial State (Requires both spin count and boson truncation)
+    rho0 = get_initial_state(v_init, n_photons_initial, N_spins=n_spins, N_boson=N_boson)
     
     # 4. Run QuTiP Solver
     res = solve_dynamics_vacuum(
@@ -194,7 +195,8 @@ def run_normalized_simulation(g_ratio, kappa_ratio, B_field_unit, v_init, tau_ma
         kappa=kappa, 
         times=t_grid, 
         rho0=rho0, 
-        N=N
+        N_spins=n_spins,
+        N_boson=N_boson
     )
     
     # 5. Run TWA Simulation
@@ -208,26 +210,34 @@ def run_normalized_simulation(g_ratio, kappa_ratio, B_field_unit, v_init, tau_ma
         omega_0=omega_0, 
         kappa=kappa, 
         B_field=B_scaled, 
-        n_photons_initial = n_photons_initial,
         g=g, 
+        n_photons_initial=n_photons_initial,
         initial_direction=jnp.array(v_init),
         coupling_type=coupling,
-        batch_size=10_000
+        batch_size=10_000,
+        n_spins=n_spins
     )
 
-    # 6. Organize and Return Data
+    # 6. Organize and Normalize Data to intensive magnetization [-1, 1]
+    # QuTiP uses jmat where eigenvalues range from -S to S (where S = n_spins / 2.0)
+    qutip_norm = n_spins / 2.0
+    
+    # DTWA generates vectors of maximum length N (sum of N spins of length 1)
+    twa_norm = n_spins
+
     return {
         "t_grid": t_grid,
         "omega_0": omega_0,
+        "n_spins": n_spins,
         "qutip": {
-            "expect_x": res.expect[0],
-            "expect_y": res.expect[1],
-            "expect_z": res.expect[2],
+            "expect_x": res.expect[0] / qutip_norm,
+            "expect_y": res.expect[1] / qutip_norm,
+            "expect_z": res.expect[2] / qutip_norm,
             "boson_num": res.expect[3]
         },
         "twa": {
-            "expect_x": twa_results_raw[:, 0],
-            "expect_y": twa_results_raw[:, 1],
-            "expect_z": twa_results_raw[:, 2]
+            "expect_x": twa_results_raw[:, 0] / twa_norm,
+            "expect_y": twa_results_raw[:, 1] / twa_norm,
+            "expect_z": twa_results_raw[:, 2] / twa_norm
         }
     }
