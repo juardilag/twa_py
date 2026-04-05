@@ -63,7 +63,6 @@ def boson_sampling(key, n_trajectories, initial_alpha=0.0):
     
     return a_init
 
-@jax.jit
 def discrete_spin_sampling_factorized(key, initial_direction, n_spins=1):
     """
     Tu lógica original generalizada para un modelo colectivo de N espines.
