@@ -64,10 +64,11 @@ def boson_sampling(key, n_trajectories, initial_alpha=0.0):
     return a_init
 
 @jax.jit
-def discrete_spin_sampling_factorized(key, initial_direction):
+def discrete_spin_sampling_factorized(key, initial_direction, n_spins=1):
     """
-    Tu lógica original: S(0) = Mean + f1*perp1 + f2*perp2
-    Mantiene el radio sqrt(3). <Sz> empezará en 1.0 sin saltos.
+    Tu lógica original generalizada para un modelo colectivo de N espines.
+    S(0) = N * Mean + F1 * perp1 + F2 * perp2
+    Las fluctuaciones transversales F1 y F2 son la suma de N variables +/- 1.
     """
     k1, k2 = jax.random.split(key)
     
@@ -84,12 +85,17 @@ def discrete_spin_sampling_factorized(key, initial_direction):
     perp1 = perp1 / (jnp.linalg.norm(perp1) + 1e-12)
     perp2 = jnp.cross(mean_vec, perp1)
     
-    # 3. Fluctuaciones discretas +/- 1
-    f1 = 2.0 * jax.random.bernoulli(k1, p=0.5) - 1.0
-    f2 = 2.0 * jax.random.bernoulli(k2, p=0.5) - 1.0
+    # 3. Fluctuaciones discretas +/- 1 para N espines
+    # Generamos N variables aleatorias para cada eje transversal y las sumamos
+    flips1 = 2.0 * jax.random.bernoulli(k1, p=0.5, shape=(n_spins,)) - 1.0
+    flips2 = 2.0 * jax.random.bernoulli(k2, p=0.5, shape=(n_spins,)) - 1.0
     
-    # 4. Construcción del espín (Radio = sqrt(3))
-    s_init = mean_vec + f1 * perp1 + f2 * perp2
+    f1 = jnp.sum(flips1)
+    f2 = jnp.sum(flips2)
+    
+    # 4. Construcción del espín macroscópico
+    # El campo medio escala linealmente con N, las fluctuaciones escalan como sqrt(N)
+    s_init = (n_spins * mean_vec) + (f1 * perp1) + (f2 * perp2)
     
     return s_init
 
