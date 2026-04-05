@@ -1,6 +1,6 @@
 import jax.numpy as jnp
 import jax
-from initial_samplings import discrete_spin_sampling_factorized, sample_coherent_discrete_rings
+from initial_samplings import discrete_spin_sampling_factorized
 from lossy_boson import solve_dynamics_vacuum, get_initial_state
 from tqdm import tqdm
 
@@ -85,15 +85,16 @@ def compute_effective_field(S_state, history_array, step_idx, gamma_kernel,
     return jnp.array([eff_field_x, 0.5*B_field[1], 0.5*B_field[2]])
 
 @jax.jit
-def heun_step_non_markovian(state_trajectory, step_idx, noise_traj, gamma_kernel, B_field, dt):
+def heun_step_non_markovian(state_trajectory, step_idx, noise_traj, gamma_kernel, B_field, dt, n_spins=1):
     curr_idx = step_idx - 1
     S_curr = state_trajectory[curr_idx]
 
     # --- PREDICTOR ---
-    B_eff_p = compute_effective_field(S_curr, state_trajectory, curr_idx, gamma_kernel, noise_traj, B_field, dt)
+    B_eff_p = compute_effective_field(S_curr, state_trajectory, curr_idx, gamma_kernel, noise_traj, B_field, dt, n_spins)
     b_mag_p = jnp.linalg.norm(B_eff_p) + 1e-16
     axis_p = B_eff_p / b_mag_p
-    angle_p = 2.0 * b_mag_p * dt
+    # The factor of 2.0 remains exact because we are tracking Sigma (length N), not S (length N/2)
+    angle_p = 2.0 * b_mag_p * dt 
     
     S_pred = (S_curr * jnp.cos(angle_p) + 
               jnp.cross(axis_p, S_curr) * jnp.sin(angle_p) + 
@@ -101,7 +102,7 @@ def heun_step_non_markovian(state_trajectory, step_idx, noise_traj, gamma_kernel
     
     # --- CORRECTOR ---
     traj_with_pred = state_trajectory.at[step_idx].set(S_pred)
-    B_eff_c = compute_effective_field(S_pred, traj_with_pred, step_idx, gamma_kernel, noise_traj, B_field, dt)
+    B_eff_c = compute_effective_field(S_pred, traj_with_pred, step_idx, gamma_kernel, noise_traj, B_field, dt, n_spins)
     
     # Average the effective magnetic fields directly!
     B_eff_avg = 0.5 * (B_eff_p + B_eff_c)
@@ -116,26 +117,27 @@ def heun_step_non_markovian(state_trajectory, step_idx, noise_traj, gamma_kernel
     return state_trajectory.at[step_idx].set(S_next), S_next
 
 
-def run_twa_bundle(keys, t_grid, omega_0, kappa, B_field, g, n_photons_initial, initial_direction, coupling_type, batch_size=1000):
+def run_twa_bundle(keys, t_grid, omega_0, kappa, B_field, g, n_photons_initial, initial_direction, coupling_type, batch_size=1000, n_spins=1):
     dt = t_grid[1] - t_grid[0]
     num_steps = t_grid.shape[0]
     n_total = keys.shape[0]
     
-    gamma_kernel_fine = compute_memory_kernel(t_grid, omega_0, kappa, g)
+    # Kernel requires n_spins to correctly scale the retardation 1/N
+    gamma_kernel_fine = compute_memory_kernel(t_grid, omega_0, kappa, g, n_spins)
     
     def solve_single_trajectory(key):
-        # We only need 2 splits now because generate_complete_noise does its own bath split internally
         k_samp, k_noise = jax.random.split(key)
         
-        s0 = discrete_spin_sampling_factorized(k_samp, initial_direction)
+        # New collective sampling!
+        s0 = discrete_spin_sampling_factorized(k_samp, initial_direction, n_spins)
         
-        # Generates BOTH transient and bath noise
-        noise_traj = generate_complete_noise(k_noise, t_grid, omega_0, kappa, g, n_photons_initial)
+        # Noise explicitly incorporates the 1/sqrt(N) scaling
+        noise_traj = generate_complete_noise(k_noise, t_grid, omega_0, kappa, g, n_photons_initial, n_spins)
         
         history_init = jnp.zeros((num_steps, 3)).at[0].set(s0)
         
         def scan_body(carry, idx):
-            return heun_step_non_markovian(carry, idx, noise_traj, gamma_kernel_fine, B_field, dt)
+            return heun_step_non_markovian(carry, idx, noise_traj, gamma_kernel_fine, B_field, dt, n_spins)
 
         final_traj, _ = jax.lax.scan(scan_body, history_init, jnp.arange(1, num_steps))
         return final_traj
@@ -148,7 +150,7 @@ def run_twa_bundle(keys, t_grid, omega_0, kappa, B_field, g, n_photons_initial, 
     total_sum = jnp.zeros((num_steps, 3))
     n_batches = int(jnp.ceil(n_total / batch_size))
     
-    print(f"Starting DTWA: {n_total} trajectories in {n_batches} batches.")
+    print(f"Starting DTWA for N={n_spins} spins: {n_total} trajectories in {n_batches} batches.")
     
     for i in tqdm(range(n_batches), desc="DTWA Batches"):
         start_idx = i * batch_size
@@ -157,6 +159,8 @@ def run_twa_bundle(keys, t_grid, omega_0, kappa, B_field, g, n_photons_initial, 
         
         total_sum = total_sum + process_batch_sum(current_keys)
         
+    # The output array naturally scales from -N to N. 
+    # If you want it normalized to [-1, 1] for plotting against QuTiP, divide by (n_total * n_spins) outside the function.
     return total_sum / n_total
 
 
