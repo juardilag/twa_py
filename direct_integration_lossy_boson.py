@@ -1,12 +1,13 @@
+import os
+os.environ["JAX_ENABLE_TRITON_GEMM"] = "0"
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"  
+os.environ["JAX_LOG_LEVEL"] = "error"    
 import jax.numpy as jnp
 import jax
 from initial_samplings import discrete_spin_sampling_factorized
 from lossy_boson import solve_dynamics_vacuum, get_initial_state
 from tqdm import tqdm
-import os
-
-os.environ["JAX_ENABLE_TRITON_GEMM"] = "0"
-
+ 
 @jax.jit
 def generate_complete_noise(key, t_grid, omega_0, kappa, g, n_photons_initial=0.0, n_spins=1):
     dt = t_grid[1] - t_grid[0]
