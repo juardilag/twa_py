@@ -75,6 +75,9 @@ def heun_step_coupled_continuous(carry, step_idx, noise_traj, B_field, dt, g, om
     return new_carry, (S_next, alpha_next)
 
 def run_coupled_twa_bundle(keys, t_grid, omega_0, kappa, B_field, g, n_photons_initial, initial_direction, batch_size=1000, n_spins=1):
+    """
+    Computes ONLY the 1D expectation values. Highly optimized for speed.
+    """
     dt = t_grid[1] - t_grid[0]
     num_steps = t_grid.shape[0]
     n_total = keys.shape[0]
@@ -82,19 +85,13 @@ def run_coupled_twa_bundle(keys, t_grid, omega_0, kappa, B_field, g, n_photons_i
     def solve_single_trajectory(key):
         k_samp_spin, k_samp_alpha, k_noise = jax.random.split(key, 3)
         
-        # 1. Sample Initial Spin State
         s0 = discrete_spin_sampling_factorized(k_samp_spin, initial_direction, n_spins)
-        
-        # 2. EXACT parity with the integrated Gaussian vacuum fluctuations
         k_init_re, k_init_im = jax.random.split(k_samp_alpha)
         vacuum_fluc_re = jax.random.normal(k_init_re) * jnp.sqrt(0.5)
         vacuum_fluc_im = jax.random.normal(k_init_im) * jnp.sqrt(0.5)
         alpha0 = jnp.sqrt(n_photons_initial) + (vacuum_fluc_re + 1j * vacuum_fluc_im)
         
-        # 3. Generate pure Markovian noise (no memory integration)
         noise_traj = generate_markovian_noise(k_noise, num_steps, dt, kappa)
-        
-        # 4. Setup Carry: (Spin, Cavity)
         carry_init = (s0, alpha0)
         
         def scan_body(carry, idx):
@@ -102,25 +99,23 @@ def run_coupled_twa_bundle(keys, t_grid, omega_0, kappa, B_field, g, n_photons_i
                 carry, idx, noise_traj, B_field, dt, g, omega_0, kappa, n_spins
             )
 
-        # 5. Scan explicit evolution
         _, (S_traj, alpha_traj) = jax.lax.scan(scan_body, carry_init, jnp.arange(1, num_steps))
         
         return jnp.vstack([s0, S_traj]), jnp.append(alpha0, alpha_traj)
 
     @jax.jit
     def process_batch_sum(batch_keys):
-        # We sum both the spin trajectories and the photon trajectories
-        batch_S_trajs, batch_alpha_trajs = jax.vmap(solve_single_trajectory)(batch_keys)
-        return jnp.sum(batch_S_trajs, axis=0), jnp.sum(batch_alpha_trajs, axis=0)
+        batch_S, batch_alpha = jax.vmap(solve_single_trajectory)(batch_keys)
+        return jnp.sum(batch_S, axis=0), jnp.sum(batch_alpha, axis=0)
 
     total_sum_S = jnp.zeros((num_steps, 3))
     total_sum_alpha = jnp.zeros(num_steps, dtype=jnp.complex64)
     
     n_batches = int(jnp.ceil(n_total / batch_size))
+
+    print(f"Starting Non-Integrated (Markovian) DTWA: {n_total} trajectories in {n_batches} batches.")
     
-    print(f"Starting Explicit Coupled DTWA (Continuous): {n_total} trajectories in {n_batches} batches.")
-    
-    for i in tqdm(range(n_batches), desc="DTWA Batches"):
+    for i in tqdm(range(n_batches), desc="DTWA Expectations"):
         start_idx = i * batch_size
         end_idx = min((i + 1) * batch_size, n_total)
         current_keys = keys[start_idx:end_idx]
