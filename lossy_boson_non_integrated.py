@@ -23,14 +23,23 @@ def generate_markovian_noise(key, num_steps, dt, kappa):
 
 @jax.jit
 def heun_step_coupled_continuous(carry, step_idx, noise_traj, B_field, dt, g, omega_0, kappa, n_spins=1):
+    """
+    Standard Continuous TWA explicit step using Exponential Time Differencing.
+    """
     S_curr, alpha_curr = carry
     
     noise_inc = noise_traj[step_idx - 1]
-    exact_decay = jnp.exp(-(1j * omega_0 + 0.5 * kappa) * dt)
+    
+    # 1. Exact Linear Propagators (Exponential Time Differencing)
+    z = 1j * omega_0 + 0.5 * kappa
+    exact_decay = jnp.exp(-z * dt)
+    
+    # The EXACT analytical integral of the spin drive over the rotating timestep dt
+    phi_drive = (1.0 - exact_decay) / z
+    
     coupling_strength = g / jnp.sqrt(n_spins)
 
     # --- 1. PREDICTOR ---
-    # Switched to '+' to perfectly match the memory kernel convention in the integrated DTWA
     B_eff_p_x = 0.5 * B_field[0] + 2.0 * coupling_strength * jnp.real(alpha_curr)
     B_eff_p = jnp.array([B_eff_p_x, 0.5 * B_field[1], 0.5 * B_field[2]])
     
@@ -42,8 +51,8 @@ def heun_step_coupled_continuous(carry, step_idx, noise_traj, B_field, dt, g, om
               jnp.cross(axis_p, S_curr) * jnp.sin(angle_p) + 
               axis_p * jnp.dot(axis_p, S_curr) * (1.0 - jnp.cos(angle_p)))
               
-    # Cavity predictor (exact linear decay + Heun coupling push)
-    alpha_pred = alpha_curr * exact_decay - 1j * coupling_strength * S_curr[0] * dt + noise_inc
+    # Cavity predictor: We use phi_drive instead of dt!
+    alpha_pred = alpha_curr * exact_decay - 1j * coupling_strength * S_curr[0] * phi_drive + noise_inc
     
     # --- 2. CORRECTOR ---
     B_eff_c_x = 0.5 * B_field[0] + 2.0 * coupling_strength * jnp.real(alpha_pred)
@@ -58,7 +67,8 @@ def heun_step_coupled_continuous(carry, step_idx, noise_traj, B_field, dt, g, om
               jnp.cross(axis_avg, S_curr) * jnp.sin(angle_avg) + 
               axis_avg * jnp.dot(axis_avg, S_curr) * (1.0 - jnp.cos(angle_avg)))
               
-    alpha_next = alpha_curr * exact_decay - 1j * coupling_strength * 0.5 * (S_curr[0] + S_pred[0]) * dt + noise_inc
+    # Cavity corrector: We use phi_drive instead of dt!
+    alpha_next = alpha_curr * exact_decay - 1j * coupling_strength * 0.5 * (S_curr[0] + S_pred[0]) * phi_drive + noise_inc
 
     new_carry = (S_next, alpha_next)
     
