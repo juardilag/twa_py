@@ -98,7 +98,7 @@ def discrete_spin_sampling_factorized(key, initial_direction, n_spins=1):
     
     return s_init
 
-@jax.jit
+
 def sample_coherent_discrete_rings(
     key: jax.Array,
     alpha_mean: complex,
