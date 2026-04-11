@@ -88,7 +88,7 @@ def heun_step_coupled_with_jumps(carry, step_idx, noise_traj, B_field, dt, g, om
     
     return new_carry, (S_final, alpha_final)
 
-def run_twa_bundle(keys, t_grid, omega_0, kappa, B_field, g, n_photons_initial, initial_direction, batch_size=1000, n_spins=1):
+def run_coupled_twa_bundle(keys, t_grid, omega_0, kappa, B_field, g, n_photons_initial, initial_direction, batch_size=1000, n_spins=1):
     dt = t_grid[1] - t_grid[0]
     num_steps = t_grid.shape[0]
     n_total = keys.shape[0]
