@@ -7,7 +7,7 @@ import jax
 from initial_samplings import discrete_spin_sampling_factorized, sample_coherent_discrete_rings
 from tqdm import tqdm
 
-@jax.jit
+@jax.jit(static_argnames=['num_steps'])
 def generate_markovian_noise(key, num_steps, dt, kappa):
     """
     Generates pure white noise increments for the explicit cavity integration.
