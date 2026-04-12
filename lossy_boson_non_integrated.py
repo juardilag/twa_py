@@ -195,3 +195,81 @@ def run_coupled_twa_correlations(keys, t_grid, omega_0, kappa, B_field, g, n_pho
         "corr_Sy": total_corr_Sy / n_total,
         "corr_Sz": total_corr_Sz / n_total
     }
+
+def run_time_integrated_correlation(keys, t_grid, omega_0, kappa, B_field, g, n_photons_initial, initial_direction, tau_steps=2000, batch_size=1000, n_spins=1):
+    """
+    Computes the 1D time-averaged correlation function C(tau) DIRECTLY in the time domain.
+    No FFTs are used. It computes the exact sliding-window average.
+    
+    tau_steps: The maximum delay time index you want to calculate (e.g., 2000 steps).
+               Must be smaller than num_steps.
+    """
+    dt = t_grid[1] - t_grid[0]
+    num_steps = t_grid.shape[0]
+    n_total = keys.shape[0]
+    
+    # The number of points we can actually average over for a given tau
+    valid_length = num_steps - tau_steps
+    tau_indices = jnp.arange(tau_steps)
+    
+    def solve_single_trajectory(key):
+        k_samp_spin, k_samp_alpha, k_noise = jax.random.split(key, 3)
+        
+        s0 = discrete_spin_sampling_factorized(k_samp_spin, initial_direction, n_spins)
+        k_init_re, k_init_im = jax.random.split(k_samp_alpha)
+        vacuum_fluc_re = jax.random.normal(k_init_re) * jnp.sqrt(0.5)
+        vacuum_fluc_im = jax.random.normal(k_init_im) * jnp.sqrt(0.5)
+        alpha0 = jnp.sqrt(n_photons_initial) + (vacuum_fluc_re + 1j * vacuum_fluc_im)
+        
+        noise_traj = generate_markovian_noise(k_noise, num_steps, dt, kappa)
+        carry_init = (s0, alpha0)
+        
+        def scan_body(carry, idx):
+            return heun_step_coupled_continuous(
+                carry, idx, noise_traj, B_field, dt, g, omega_0, kappa, n_spins
+            )
+
+        _, (_, alpha_traj) = jax.lax.scan(scan_body, carry_init, jnp.arange(1, num_steps))
+        alpha_full = jnp.append(alpha0, alpha_traj)
+        
+        # --- THE EXACT TIME-DOMAIN SLIDING WINDOW (NO FFT) ---
+        def compute_C_tau(tau):
+            # Grab the unshifted base array of size `valid_length`
+            a_base = jax.lax.dynamic_slice_in_dim(alpha_full, 0, valid_length)
+            
+            # Grab the shifted array of the exact same size
+            a_shifted = jax.lax.dynamic_slice_in_dim(alpha_full, tau, valid_length)
+            
+            # Return the exact time-average for this specific tau
+            return jnp.mean(jnp.conj(a_shifted) * a_base)
+        
+        # Vectorize the exact calculation over all requested delay times
+        C_tau = jax.vmap(compute_C_tau)(tau_indices)
+        return C_tau
+
+    @jax.jit
+    def process_batch_sum(batch_keys):
+        batch_C = jax.vmap(solve_single_trajectory)(batch_keys)
+        return jnp.sum(batch_C, axis=0)
+
+    total_C_tau = jnp.zeros(tau_steps, dtype=jnp.complex64)
+    n_batches = int(jnp.ceil(n_total / batch_size))
+    
+    print(f"Computing Exact Time-Domain Correlation up to tau={tau_steps} steps...")
+    for i in tqdm(range(n_batches), desc="Autocorrelation Batches"):
+        start_idx = i * batch_size
+        end_idx = min((i + 1) * batch_size, n_total)
+        current_keys = keys[start_idx:end_idx]
+        
+        total_C_tau += process_batch_sum(current_keys)
+        
+    C_wigner_tau = total_C_tau / n_total
+    
+    # --- EXACT LINEAR RESPONSE (VACUUM SUBTRACTION) ---
+    tau_time = tau_indices * dt
+    chi_tau = jnp.exp((1j * omega_0 - 0.5 * kappa) * tau_time)
+    
+    # Physical Correlation: <a+(tau) a(0)> = C_Wigner - 0.5 * <[a(tau), a+(0)]>
+    C_physical_tau = C_wigner_tau - 0.5 * chi_tau
+    
+    return tau_time, C_physical_tau, C_wigner_tau
