@@ -125,3 +125,73 @@ def run_coupled_twa_bundle(keys, t_grid, omega_0, kappa, B_field, g, n_photons_i
         total_sum_alpha += batch_sum_alpha
         
     return total_sum_S / n_total, total_sum_alpha / n_total
+
+
+def run_coupled_twa_correlations(keys, t_grid, omega_0, kappa, B_field, g, n_photons_initial, initial_direction, batch_size=1000, n_spins=1):
+    """
+    Computes ONLY the 2D two-time Wigner correlation matrices.
+    """
+    dt = t_grid[1] - t_grid[0]
+    num_steps = t_grid.shape[0]
+    n_total = keys.shape[0]
+    
+    def solve_single_trajectory(key):
+        k_samp_spin, k_samp_alpha, k_noise = jax.random.split(key, 3)
+        
+        s0 = discrete_spin_sampling_factorized(k_samp_spin, initial_direction, n_spins)
+        k_init_re, k_init_im = jax.random.split(k_samp_alpha)
+        vacuum_fluc_re = jax.random.normal(k_init_re) * jnp.sqrt(0.5)
+        vacuum_fluc_im = jax.random.normal(k_init_im) * jnp.sqrt(0.5)
+        alpha0 = jnp.sqrt(n_photons_initial) + (vacuum_fluc_re + 1j * vacuum_fluc_im)
+        
+        noise_traj = generate_markovian_noise(k_noise, num_steps, dt, kappa)
+        carry_init = (s0, alpha0)
+        
+        def scan_body(carry, idx):
+            return heun_step_coupled_continuous(
+                carry, idx, noise_traj, B_field, dt, g, omega_0, kappa, n_spins
+            )
+
+        _, (S_traj, alpha_traj) = jax.lax.scan(scan_body, carry_init, jnp.arange(1, num_steps))
+        
+        return jnp.vstack([s0, S_traj]), jnp.append(alpha0, alpha_traj)
+
+    @jax.jit
+    def process_batch_sum(batch_keys):
+        batch_S, batch_alpha = jax.vmap(solve_single_trajectory)(batch_keys)
+        
+        # 2D Wigner Correlation Matrices ONLY
+        # jnp.outer(A, B) creates the matrix where element i,j is A[i]*B[j]
+        sum_corr_alpha = jnp.sum(jax.vmap(lambda a: jnp.outer(jnp.conj(a), a))(batch_alpha), axis=0)
+        sum_corr_Sx = jnp.sum(jax.vmap(lambda s: jnp.outer(s[:, 0], s[:, 0]))(batch_S), axis=0)
+        sum_corr_Sy = jnp.sum(jax.vmap(lambda s: jnp.outer(s[:, 1], s[:, 1]))(batch_S), axis=0)
+        sum_corr_Sz = jnp.sum(jax.vmap(lambda s: jnp.outer(s[:, 2], s[:, 2]))(batch_S), axis=0)
+        
+        return sum_corr_alpha, sum_corr_Sx, sum_corr_Sy, sum_corr_Sz
+
+    # Initialize accumulators for matrices only
+    total_corr_alpha = jnp.zeros((num_steps, num_steps), dtype=jnp.complex64)
+    total_corr_Sx = jnp.zeros((num_steps, num_steps))
+    total_corr_Sy = jnp.zeros((num_steps, num_steps))
+    total_corr_Sz = jnp.zeros((num_steps, num_steps))
+    
+    n_batches = int(jnp.ceil(n_total / batch_size))
+    
+    for i in tqdm(range(n_batches), desc="DTWA 2D Correlations"):
+        start_idx = i * batch_size
+        end_idx = min((i + 1) * batch_size, n_total)
+        current_keys = keys[start_idx:end_idx]
+        
+        s_ca, s_cx, s_cy, s_cz = process_batch_sum(current_keys)
+        
+        total_corr_alpha += s_ca
+        total_corr_Sx += s_cx
+        total_corr_Sy += s_cy
+        total_corr_Sz += s_cz
+        
+    return {
+        "corr_alpha": total_corr_alpha / n_total,
+        "corr_Sx": total_corr_Sx / n_total,
+        "corr_Sy": total_corr_Sy / n_total,
+        "corr_Sz": total_corr_Sz / n_total
+    }
