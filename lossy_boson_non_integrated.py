@@ -273,3 +273,32 @@ def run_time_integrated_correlation(keys, t_grid, omega_0, kappa, B_field, g, n_
     C_physical_tau = C_wigner_tau - 0.5 * chi_tau
     
     return tau_time, C_physical_tau, C_wigner_tau
+
+@jax.jit
+def compute_spectrum(C_tau, tau_grid, omega_grid):
+    """
+    Computes the emission spectrum using a direct Riemann sum over an arbitrary frequency grid.
+    Bypasses FFT to allow for infinite sub-grid frequency resolution.
+    """
+    dt = tau_grid[1] - tau_grid[0]
+    
+    # Optional but highly recommended: Apply an apodization window.
+    # If C_tau hasn't completely decayed to 0 at the end of the array, 
+    # the sharp cut-off will cause artificial "ringing" in your spectrum.
+    window = jnp.hanning(C_tau.shape[0])
+    C_tau_windowed = C_tau * window
+    
+    def compute_single_omega(omega):
+        # 1. Evaluate the integrand: C(tau) * exp(i * w * tau)
+        integrand = C_tau_windowed * jnp.exp(1j * omega * tau_grid)
+        
+        # 2. Riemann Sum (dt * sum)
+        one_sided_integral = jnp.sum(integrand) * dt
+        
+        # 3. Multiply by 2 and take the Real part to reconstruct the full symmetric integral
+        return 2.0 * jnp.real(one_sided_integral)
+
+    # Vectorize the integration perfectly across the entire custom frequency array
+    spectrum = jax.vmap(compute_single_omega)(omega_grid)
+    
+    return spectrum
