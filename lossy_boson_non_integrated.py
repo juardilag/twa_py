@@ -274,31 +274,117 @@ def run_time_integrated_correlation(keys, t_grid, omega_0, kappa, B_field, g, n_
     
     return tau_time, C_physical_tau, C_wigner_tau
 
+def run_time_integrated_spin_correlation(keys, t_grid, omega_0, kappa, B_field, g, n_photons_initial, initial_direction, tau_steps=2000, batch_size=1000, n_spins=1):
+    """
+    Computes the 1D time-averaged spin dipole correlation C(tau) = <S+(tau) S-(0)>.
+    This is highly robust against Monte Carlo noise and requires ZERO vacuum subtraction.
+    """
+    dt = t_grid[1] - t_grid[0]
+    num_steps = t_grid.shape[0]
+    n_total = keys.shape[0]
+    
+    # SAFEGUARD: Ensure we never try to shift past the end of the array.
+    max_allowed_tau = int(num_steps * 0.9)
+    actual_tau_steps = min(tau_steps, max_allowed_tau)
+    
+    valid_length = num_steps - actual_tau_steps
+    tau_indices = jnp.arange(actual_tau_steps)
+    
+    def solve_single_trajectory(key):
+        k_samp_spin, k_samp_alpha, k_noise = jax.random.split(key, 3)
+        
+        s0 = discrete_spin_sampling_factorized(k_samp_spin, initial_direction, n_spins)
+        k_init_re, k_init_im = jax.random.split(k_samp_alpha)
+        vacuum_fluc_re = jax.random.normal(k_init_re) * jnp.sqrt(0.5)
+        vacuum_fluc_im = jax.random.normal(k_init_im) * jnp.sqrt(0.5)
+        alpha0 = jnp.sqrt(n_photons_initial) + (vacuum_fluc_re + 1j * vacuum_fluc_im)
+        
+        noise_traj = generate_markovian_noise(k_noise, num_steps, dt, kappa)
+        carry_init = (s0, alpha0)
+        
+        def scan_body(carry, idx):
+            return heun_step_coupled_continuous(
+                carry, idx, noise_traj, B_field, dt, g, omega_0, kappa, n_spins
+            )
+
+        _, (S_traj, _) = jax.lax.scan(scan_body, carry_init, jnp.arange(1, num_steps))
+        
+        # S_full contains the spin trajectories. 
+        S_full = jnp.vstack([s0, S_traj])
+        
+        # 1. Extract the macroscopic collective spin.
+        # If your S_full shape is (time_steps, n_spins, 3), we sum over the spins.
+        # If it is already (time_steps, 3), we just take the components.
+        if S_full.ndim == 3:
+            Sx = jnp.sum(S_full[:, :, 0], axis=1)
+            Sy = jnp.sum(S_full[:, :, 1], axis=1)
+        else:
+            Sx = S_full[:, 0]
+            Sy = S_full[:, 1]
+            
+        # 2. Construct the complex raising/lowering operators
+        S_plus = Sx + 1j * Sy
+        # In classical TWA, S_minus is simply the complex conjugate of S_plus
+        S_minus = jnp.conj(S_plus)
+        
+        # --- THE EXACT TIME-DOMAIN SLIDING WINDOW ---
+        def compute_C_tau(tau):
+            # Base array evaluated at t = 0
+            S_minus_base = jax.lax.dynamic_slice_in_dim(S_minus, 0, valid_length)
+            
+            # Shifted array evaluated at t = tau
+            S_plus_shifted = jax.lax.dynamic_slice_in_dim(S_plus, tau, valid_length)
+            
+            # C(tau) = <S+(tau) S-(0)>
+            return jnp.mean(S_plus_shifted * S_minus_base)
+        
+        # Vectorize over all requested delay times
+        C_tau = jax.vmap(compute_C_tau)(tau_indices)
+        return C_tau
+
+    @jax.jit
+    def process_batch_sum(batch_keys):
+        batch_C = jax.vmap(solve_single_trajectory)(batch_keys)
+        return jnp.sum(batch_C, axis=0)
+
+    total_C_tau = jnp.zeros(actual_tau_steps, dtype=jnp.complex64)
+    n_batches = int(jnp.ceil(n_total / batch_size))
+    
+    print(f"Computing Exact Spin Dipole Correlation up to tau={actual_tau_steps} steps...")
+    for i in tqdm(range(n_batches), desc="Spin Autocorrelation"):
+        start_idx = i * batch_size
+        end_idx = min((i + 1) * batch_size, n_total)
+        current_keys = keys[start_idx:end_idx]
+        
+        total_C_tau += process_batch_sum(current_keys)
+        
+    C_spin_tau = total_C_tau / n_total
+    tau_time = tau_indices * dt
+    
+    # Notice we return this DIRECTLY. No vacuum subtraction needed!
+    return tau_time, C_spin_tau
+
 @jax.jit
 def compute_spectrum(C_tau, tau_grid, omega_grid):
     """
-    Computes the emission spectrum using a direct Riemann sum over an arbitrary frequency grid.
-    Bypasses FFT to allow for infinite sub-grid frequency resolution.
+    Computes the exact power spectrum using the one-sided Wiener-Khinchin theorem.
+    No windowing is applied so the pure physics is preserved.
     """
     dt = tau_grid[1] - tau_grid[0]
     
-    # Optional but highly recommended: Apply an apodization window.
-    # If C_tau hasn't completely decayed to 0 at the end of the array, 
-    # the sharp cut-off will cause artificial "ringing" in your spectrum.
-    window = jnp.hanning(C_tau.shape[0])
-    C_tau_windowed = C_tau * window
-    
     def compute_single_omega(omega):
-        # 1. Evaluate the integrand: C(tau) * exp(i * w * tau)
-        integrand = C_tau_windowed * jnp.exp(1j * omega * tau_grid)
+        # 1. The correct physical phase for emission: -i * omega * tau
+        integrand = C_tau * jnp.exp(-1j * omega * tau_grid)
         
-        # 2. Riemann Sum (dt * sum)
+        # 2. Trapezoidal rule correction: halve the tau=0 point.
+        # This prevents overcounting the boundary which causes vertical offsets.
+        integrand = integrand.at[0].multiply(0.5)
+        
+        # 3. Riemann sum
         one_sided_integral = jnp.sum(integrand) * dt
         
-        # 3. Multiply by 2 and take the Real part to reconstruct the full symmetric integral
+        # 4. Multiply by 2 and take the Real part to reconstruct the full symmetric integral
         return 2.0 * jnp.real(one_sided_integral)
 
-    # Vectorize the integration perfectly across the entire custom frequency array
-    spectrum = jax.vmap(compute_single_omega)(omega_grid)
-    
-    return spectrum
+    # Vectorize across your custom high-resolution frequency grid
+    return jax.vmap(compute_single_omega)(omega_grid)
