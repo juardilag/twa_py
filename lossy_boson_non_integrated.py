@@ -271,7 +271,7 @@ def run_time_integrated_light_correlation(keys, t_grid, omega_0, kappa, B_field,
     chi_tau_exact = total_chi_tau / n_total
     
     # --- EXACT PHYSICAL CORRELATION ---
-    C_physical_tau = C_wigner_tau - 0.5 * chi_tau_exact
+    C_physical_tau = C_wigner_tau - 0.5 * jnp.conj(chi_tau_exact)
     
     tau_time = tau_indices * dt
     
