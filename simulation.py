@@ -9,7 +9,7 @@ from lossy_boson_integrated import run_integrated_twa_bundle
 from lossy_boson_non_integrated import run_coupled_twa_bundle, run_time_integrated_light_correlation, compute_spectrum
 
 
-def run_normalized_simulation(g_ratio, kappa_ratio, B_field_unit, v_init, tau_max, omega_0, n_photons_initial, num_steps, n_spins=1, N_boson=30, coupling='full'):
+def run_normalized_simulation(g_ratio, kappa_ratio, B_field_unit, v_init, tau_max, omega_0, n_photons_initial, num_steps, n_spins=1, N_boson=30, run_qutip=True):
     """
     Runs QuTiP, Integrated DTWA, and Explicit Coupled DTWA simulations 
     using normalized parameters for N spins, and calculates the emission spectrum.
@@ -32,20 +32,33 @@ def run_normalized_simulation(g_ratio, kappa_ratio, B_field_unit, v_init, tau_ma
     # 3. Initial State (Requires both spin count and boson truncation)
     rho0 = get_initial_state(v_init, n_photons_initial, N_spins=n_spins, N_boson=N_boson)
     
-    # 4. Run QuTiP Solver
-    print("--- Running Exact QuTiP Simulation ---")
-    res = solve_dynamics_vacuum(
-        Bx=B_scaled[0], 
-        By=B_scaled[1], 
-        Bz=B_scaled[2], 
-        wa=omega_0, 
-        g=g, 
-        kappa=kappa, 
-        times=t_grid, 
-        rho0=rho0, 
-        N_spins=n_spins,
-        N_boson=N_boson
-    )
+    # 4. Run QuTiP Solver (Optional)
+    if run_qutip:
+        print("--- Running Exact QuTiP Simulation ---")
+        res = solve_dynamics_vacuum(
+            Bx=B_scaled[0], 
+            By=B_scaled[1], 
+            Bz=B_scaled[2], 
+            wa=omega_0, 
+            g=g, 
+            kappa=kappa, 
+            times=t_grid, 
+            rho0=rho0, 
+            N_spins=n_spins,
+            N_boson=N_boson
+        )
+        qutip_x_raw = res.expect[0]
+        qutip_y_raw = res.expect[1]
+        qutip_z_raw = res.expect[2]
+        qutip_boson_raw = res.expect[3]
+    else:
+        print("--- Skipping Exact QuTiP Simulation ---")
+        # Use NaN arrays so downstream Matplotlib plots won't crash
+        null_array = jnp.full_like(t_grid, jnp.nan)
+        qutip_x_raw = null_array
+        qutip_y_raw = null_array
+        qutip_z_raw = null_array
+        qutip_boson_raw = null_array
     
     # 5. Setup TWA PRNG Keys
     n_trajectories = 50_000 
@@ -160,12 +173,6 @@ def run_normalized_simulation(g_ratio, kappa_ratio, B_field_unit, v_init, tau_ma
     
     # 7. Clean Baseline Noise Floor
     real_spectrum = jnp.real(spectrum_zoom)
-    sorted_spectrum = jnp.sort(real_spectrum)
-    idx_5_percent = int(0.05 * sorted_spectrum.shape[0])
-    noise_floor = sorted_spectrum[idx_5_percent]
-    
-    S_w_clean = real_spectrum - noise_floor
-    S_w_clean = jnp.maximum(S_w_clean, 0.0)
 
     # 9. Organize and Normalize Data to intensive magnetization [-1, 1]
     qutip_norm = n_spins / 2.0
@@ -177,10 +184,10 @@ def run_normalized_simulation(g_ratio, kappa_ratio, B_field_unit, v_init, tau_ma
         "omega_0": omega_0,
         "n_spins": n_spins,
         "qutip": {
-            "expect_x": res.expect[0] / qutip_norm,
-            "expect_y": res.expect[1] / qutip_norm,
-            "expect_z": res.expect[2] / qutip_norm,
-            "boson_num": res.expect[3]
+            "expect_x": qutip_x_raw / qutip_norm,
+            "expect_y": qutip_y_raw / qutip_norm,
+            "expect_z": qutip_z_raw / qutip_norm,
+            "boson_num": qutip_boson_raw
         },
         "twa_integrated": {
             "expect_x": twa_integrated_raw[:, 0] / twa_norm,
@@ -197,6 +204,6 @@ def run_normalized_simulation(g_ratio, kappa_ratio, B_field_unit, v_init, tau_ma
             "tau_time": tau_padded,
             "C_spin_tau": C_padded,
             "omega": omega_zoom,
-            "S_omega": S_w_clean
+            "S_omega": real_spectrum
         }
     }
