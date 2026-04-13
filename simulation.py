@@ -1,17 +1,22 @@
+import os
+os.environ["JAX_ENABLE_TRITON_GEMM"] = "0"
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"  
+os.environ["JAX_LOG_LEVEL"] = "error"   
 import jax
 import jax.numpy as jnp
 from lossy_boson import solve_dynamics_vacuum, get_initial_state
 from lossy_boson_integrated import run_integrated_twa_bundle
-from lossy_boson_non_integrated import run_coupled_twa_bundle
+from lossy_boson_non_integrated import run_coupled_twa_bundle, run_time_integrated_light_correlation, compute_spectrum
+
 
 def run_normalized_simulation(g_ratio, kappa_ratio, B_field_unit, v_init, tau_max, omega_0, n_photons_initial, num_steps, n_spins=1, N_boson=30, coupling='full'):
     """
     Runs QuTiP, Integrated DTWA, and Explicit Coupled DTWA simulations 
-    using normalized parameters for N spins.
+    using normalized parameters for N spins, and calculates the emission spectrum.
     
     Returns:
         dict: Contains t_grid, normalized QuTiP expectation values [-1, 1], 
-              and normalized TWA results [-1, 1].
+              normalized TWA results [-1, 1], and the spin emission spectrum.
     """
     # 1. Scale parameters relative to omega_0
     kappa = kappa_ratio * omega_0
@@ -61,8 +66,7 @@ def run_normalized_simulation(g_ratio, kappa_ratio, B_field_unit, v_init, tau_ma
         g=g, 
         n_photons_initial=n_photons_initial,
         initial_direction=jnp.array(v_init),
-        coupling_type=coupling,
-        batch_size=10_000,
+        batch_size=25_000,
         n_spins=n_spins
     )
 
@@ -77,18 +81,38 @@ def run_normalized_simulation(g_ratio, kappa_ratio, B_field_unit, v_init, tau_ma
         g=g, 
         n_photons_initial=n_photons_initial,
         initial_direction=jnp.array(v_init),
-        batch_size=10_000,
+        batch_size=25_000,
         n_spins=n_spins
     )
 
-    # 8. Organize and Normalize Data to intensive magnetization [-1, 1]
-    # QuTiP uses jmat where eigenvalues range from -S to S (where S = n_spins / 2.0)
+    t_grid_corr = jnp.linspace(0, 2*t_max, 2*num_steps)
+    
+    # 8. Run Spin Correlation and Spectrum
+    print("--- Computing Emission Spectrum (Spin Dipole) ---")
+    # Dynamically bound tau_steps to prevent JAX slicing crashes
+    safe_tau_steps = min(2500, int(2*num_steps*0.9))
+    
+    tau_time, C_physical_tau = run_time_integrated_light_correlation(
+        keys=keys_coup,                 
+        t_grid=t_grid_corr, 
+        omega_0=omega_0, 
+        kappa=kappa, 
+        B_field=B_scaled, 
+        g=g, 
+        n_photons_initial=n_photons_initial, 
+        initial_direction=v_init,
+        tau_steps=safe_tau_steps,
+        batch_size=25_000,               
+        n_spins=n_spins
+    )
+    
+    # Define frequency grid (Wide enough to capture Ultra-Strong polaritons)
+    omega_zoom = jnp.linspace(omega_0 - 1, omega_0 + 1, 5000)
+    spectrum_zoom = compute_spectrum(C_physical_tau, tau_time, omega_zoom)
+
+    # 9. Organize and Normalize Data to intensive magnetization [-1, 1]
     qutip_norm = n_spins / 2.0
-    
-    # DTWA generates vectors of maximum length N (sum of N spins of length 1)
     twa_norm = n_spins
-    
-    # Extract Wigner photon number mapping: <n> = <|alpha|^2> - 1/2
     coupled_boson_num = jnp.abs(twa_coupled_alpha)**2 - 0.5
 
     return {
@@ -111,5 +135,11 @@ def run_normalized_simulation(g_ratio, kappa_ratio, B_field_unit, v_init, tau_ma
             "expect_y": twa_coupled_S[:, 1] / twa_norm,
             "expect_z": twa_coupled_S[:, 2] / twa_norm,
             "boson_num": coupled_boson_num
+        },
+        "spectrum": {
+            "tau_time": tau_time,
+            "C_spin_tau": C_physical_tau,
+            "omega": omega_zoom,
+            "S_omega": spectrum_zoom
         }
     }
