@@ -85,12 +85,14 @@ def run_normalized_simulation(g_ratio, kappa_ratio, B_field_unit, v_init, tau_ma
         n_spins=n_spins
     )
 
-    t_grid_corr = jnp.linspace(0, 2*t_max, 2*num_steps)
+    t_grid_corr = jnp.linspace(0, t_max, num_steps)
+    dt = t_grid_corr[1] - t_grid_corr[0]
     
     # 8. Run Spin Correlation and Spectrum
     print("--- Computing Emission Spectrum (Spin Dipole) ---")
-    # Dynamically bound tau_steps to prevent JAX slicing crashes
-    safe_tau_steps = min(2500, int(2*num_steps*0.9))
+    
+    # Allow tau to run up to 90% of the total simulation, but cap at 2500
+    safe_tau_steps = min(2500, int(num_steps * 0.9))
     
     tau_time, C_physical_tau = run_time_integrated_light_correlation(
         keys=keys_coup,                 
@@ -105,10 +107,65 @@ def run_normalized_simulation(g_ratio, kappa_ratio, B_field_unit, v_init, tau_ma
         batch_size=25_000,               
         n_spins=n_spins
     )
+
+    tau_steps = safe_tau_steps
+    tau_indices = jnp.arange(tau_steps)
+
+    # --- THE ROBUST ENVELOPE & FALLBACK THRESHOLD ---
+    noise_threshold = 0.05
     
-    # Define frequency grid (Wide enough to capture Ultra-Strong polaritons)
-    omega_zoom = jnp.linspace(omega_0 - 1, omega_0 + 1, 5000)
-    spectrum_zoom = compute_spectrum(C_physical_tau, tau_time, omega_zoom)
+    # 1. Create a smooth envelope to ignore oscillations and random Monte Carlo spikes
+    smoothing_window = 30
+    kernel = jnp.ones(smoothing_window) / smoothing_window
+    envelope = jnp.convolve(jnp.abs(C_physical_tau), kernel, mode='same')
+
+    # 2. Apply threshold to the smooth envelope
+    active_mask = envelope > noise_threshold
+    last_active_idx = jnp.max(tau_indices * active_mask)
+
+    # 3. Define buffers
+    buffer_steps = 20
+    taper_steps = 30 # Generous taper to ensure a smooth transition to 0.0
+
+    # 4. THE SAFETY NET: 
+    # Force the cutoff to happen early enough so the taper fully finishes before the array ends.
+    # This prevents the cliff even if the signal is still huge at the end of the simulation.
+    max_allowable_cutoff = tau_steps - taper_steps - 1
+    cutoff_idx = jnp.minimum(last_active_idx + buffer_steps, max_allowable_cutoff)
+
+    # 5. Build dynamic window
+    def build_dynamic_window(idx):
+        dist = idx - cutoff_idx
+        return jnp.where(
+            dist <= 0,
+            1.0, # Keep physics untouched
+            jnp.where(
+                dist < taper_steps,
+                jnp.cos(jnp.pi / 2.0 * (dist / taper_steps))**2, # Soften the cut
+                0.0 # Total silence for padding
+            )
+        )
+
+    dynamic_window = jax.vmap(build_dynamic_window)(tau_indices)
+
+    C_clean = C_physical_tau * dynamic_window
+    
+    # 6. Zero-Pad and Transform
+    pad_length = 5000
+    C_padded = jnp.pad(C_clean, (0, pad_length))
+    tau_padded = jnp.arange(tau_steps + pad_length) * dt
+
+    omega_zoom = jnp.linspace(omega_0 - 1, omega_0 + 1, num_steps)
+    spectrum_zoom = compute_spectrum(C_padded, tau_padded, omega_zoom)
+    
+    # 7. Clean Baseline Noise Floor
+    real_spectrum = jnp.real(spectrum_zoom)
+    sorted_spectrum = jnp.sort(real_spectrum)
+    idx_5_percent = int(0.05 * sorted_spectrum.shape[0])
+    noise_floor = sorted_spectrum[idx_5_percent]
+    
+    S_w_clean = real_spectrum - noise_floor
+    S_w_clean = jnp.maximum(S_w_clean, 0.0)
 
     # 9. Organize and Normalize Data to intensive magnetization [-1, 1]
     qutip_norm = n_spins / 2.0
@@ -137,9 +194,9 @@ def run_normalized_simulation(g_ratio, kappa_ratio, B_field_unit, v_init, tau_ma
             "boson_num": coupled_boson_num
         },
         "spectrum": {
-            "tau_time": tau_time,
-            "C_spin_tau": C_physical_tau,
+            "tau_time": tau_padded,
+            "C_spin_tau": C_padded,
             "omega": omega_zoom,
-            "S_omega": spectrum_zoom
+            "S_omega": S_w_clean
         }
     }
