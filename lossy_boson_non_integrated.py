@@ -126,153 +126,163 @@ def run_coupled_twa_bundle(keys, t_grid, omega_0, kappa, B_field, g, n_photons_i
         
     return total_sum_S / n_total, total_sum_alpha / n_total
 
-
-def run_coupled_twa_correlations(keys, t_grid, omega_0, kappa, B_field, g, n_photons_initial, initial_direction, batch_size=1000, n_spins=1):
+def run_time_integrated_light_correlation(keys, t_grid, omega_0, kappa, B_field, g, n_photons_initial, initial_direction, tau_steps=2000, batch_size=1000, n_spins=1):
     """
-    Computes ONLY the 2D two-time Wigner correlation matrices.
-    """
-    dt = t_grid[1] - t_grid[0]
-    num_steps = t_grid.shape[0]
-    n_total = keys.shape[0]
-    
-    def solve_single_trajectory(key):
-        k_samp_spin, k_samp_alpha, k_noise = jax.random.split(key, 3)
-        
-        s0 = discrete_spin_sampling_factorized(k_samp_spin, initial_direction, n_spins)
-        k_init_re, k_init_im = jax.random.split(k_samp_alpha)
-        vacuum_fluc_re = jax.random.normal(k_init_re) * jnp.sqrt(0.5)
-        vacuum_fluc_im = jax.random.normal(k_init_im) * jnp.sqrt(0.5)
-        alpha0 = jnp.sqrt(n_photons_initial) + (vacuum_fluc_re + 1j * vacuum_fluc_im)
-        
-        noise_traj = generate_markovian_noise(k_noise, num_steps, dt, kappa)
-        carry_init = (s0, alpha0)
-        
-        def scan_body(carry, idx):
-            return heun_step_coupled_continuous(
-                carry, idx, noise_traj, B_field, dt, g, omega_0, kappa, n_spins
-            )
-
-        _, (S_traj, alpha_traj) = jax.lax.scan(scan_body, carry_init, jnp.arange(1, num_steps))
-        
-        return jnp.vstack([s0, S_traj]), jnp.append(alpha0, alpha_traj)
-
-    @jax.jit
-    def process_batch_sum(batch_keys):
-        batch_S, batch_alpha = jax.vmap(solve_single_trajectory)(batch_keys)
-        
-        # 2D Wigner Correlation Matrices ONLY
-        # jnp.outer(A, B) creates the matrix where element i,j is A[i]*B[j]
-        sum_corr_alpha = jnp.sum(jax.vmap(lambda a: jnp.outer(jnp.conj(a), a))(batch_alpha), axis=0)
-        sum_corr_Sx = jnp.sum(jax.vmap(lambda s: jnp.outer(s[:, 0], s[:, 0]))(batch_S), axis=0)
-        sum_corr_Sy = jnp.sum(jax.vmap(lambda s: jnp.outer(s[:, 1], s[:, 1]))(batch_S), axis=0)
-        sum_corr_Sz = jnp.sum(jax.vmap(lambda s: jnp.outer(s[:, 2], s[:, 2]))(batch_S), axis=0)
-        
-        return sum_corr_alpha, sum_corr_Sx, sum_corr_Sy, sum_corr_Sz
-
-    # Initialize accumulators for matrices only
-    total_corr_alpha = jnp.zeros((num_steps, num_steps), dtype=jnp.complex64)
-    total_corr_Sx = jnp.zeros((num_steps, num_steps))
-    total_corr_Sy = jnp.zeros((num_steps, num_steps))
-    total_corr_Sz = jnp.zeros((num_steps, num_steps))
-    
-    n_batches = int(jnp.ceil(n_total / batch_size))
-    
-    for i in tqdm(range(n_batches), desc="DTWA 2D Correlations"):
-        start_idx = i * batch_size
-        end_idx = min((i + 1) * batch_size, n_total)
-        current_keys = keys[start_idx:end_idx]
-        
-        s_ca, s_cx, s_cy, s_cz = process_batch_sum(current_keys)
-        
-        total_corr_alpha += s_ca
-        total_corr_Sx += s_cx
-        total_corr_Sy += s_cy
-        total_corr_Sz += s_cz
-        
-    return {
-        "corr_alpha": total_corr_alpha / n_total,
-        "corr_Sx": total_corr_Sx / n_total,
-        "corr_Sy": total_corr_Sy / n_total,
-        "corr_Sz": total_corr_Sz / n_total
-    }
-
-def run_time_integrated_correlation(keys, t_grid, omega_0, kappa, B_field, g, n_photons_initial, initial_direction, tau_steps=2000, batch_size=1000, n_spins=1):
-    """
-    Computes the 1D time-averaged correlation function C(tau) DIRECTLY in the time domain.
-    No FFTs are used. It computes the exact sliding-window average.
-    
-    tau_steps: The maximum delay time index you want to calculate (e.g., 2000 steps).
-               Must be smaller than num_steps.
+    Computes the 1D time-integrated correlation function C(tau) DIRECTLY in the time domain.
+    Uses the Rolling Tangent Method to compute the exact unequal-time commutator for 
+    interacting systems, replacing the empty-cavity approximation.
     """
     dt = t_grid[1] - t_grid[0]
     num_steps = t_grid.shape[0]
     n_total = keys.shape[0]
     
-    # The number of points we can actually average over for a given tau
+    # The number of points we can actually sum over for a given tau
     valid_length = num_steps - tau_steps
     tau_indices = jnp.arange(tau_steps)
     
     def solve_single_trajectory(key):
         k_samp_spin, k_samp_alpha, k_noise = jax.random.split(key, 3)
         
+        # 1. INITIALIZATION
         s0 = discrete_spin_sampling_factorized(k_samp_spin, initial_direction, n_spins)
         k_init_re, k_init_im = jax.random.split(k_samp_alpha)
         vacuum_fluc_re = jax.random.normal(k_init_re) * jnp.sqrt(0.5)
         vacuum_fluc_im = jax.random.normal(k_init_im) * jnp.sqrt(0.5)
-        alpha0 = jnp.sqrt(n_photons_initial) + (vacuum_fluc_re + 1j * vacuum_fluc_im)
+        
+        alpha0_re = jnp.sqrt(n_photons_initial) + vacuum_fluc_re
+        alpha0_im = vacuum_fluc_im
+        alpha0_complex = alpha0_re + 1j * alpha0_im
         
         noise_traj = generate_markovian_noise(k_noise, num_steps, dt, kappa)
-        carry_init = (s0, alpha0)
         
-        def scan_body(carry, idx):
-            return heun_step_coupled_continuous(
-                carry, idx, noise_traj, B_field, dt, g, omega_0, kappa, n_spins
+        # Base carry state split into strictly real components for jax.linearize
+        carry_init_ri = (s0, alpha0_re, alpha0_im)
+        
+        # Initialize zero-buffers for the rolling tangents
+        # Shape: (tau_steps, ...) for each variable in the carry state
+        t_Re_init = jax.tree.map(lambda x: jnp.zeros((tau_steps,) + x.shape), carry_init_ri)
+        t_Im_init = jax.tree.map(lambda x: jnp.zeros((tau_steps,) + x.shape), carry_init_ri)
+        chi_acc_init = jnp.zeros(tau_steps, dtype=jnp.complex64)
+        
+        loop_state = (carry_init_ri, t_Re_init, t_Im_init, chi_acc_init)
+
+        # 2. SCAN BODY WITH ROLLING TANGENTS
+        def scan_body(loop_state, idx):
+            carry_ri, t_Re, t_Im, chi_acc = loop_state
+            
+            # Wrapper to handle the Real/Imaginary split required by jax.linearize
+            def pure_step_fn(c_ri):
+                s_in, a_re_in, a_im_in = c_ri
+                c_complex = (s_in, a_re_in + 1j * a_im_in)
+                
+                # 1. Capture the tuple structure expected by jax.lax.scan
+                next_carry, step_output = heun_step_coupled_continuous(
+                    c_complex, idx, noise_traj, B_field, dt, g, omega_0, kappa, n_spins
+                )
+                
+                # 2. Extract the actual state variables from the carry
+                s_next, a_next = next_carry
+                
+                # 3. Return the split real/imaginary state for the automatic differentiator
+                return (s_next, jnp.real(a_next), jnp.imag(a_next))
+
+            # Push forward the primary state and get the Jacobian-vector product function
+            next_carry_ri, jvp_fn = jax.linearize(pure_step_fn, carry_ri)
+
+            # Push all historical perturbations forward one time step
+            next_t_Re = jax.vmap(jvp_fn)(t_Re)
+            next_t_Im = jax.vmap(jvp_fn)(t_Im)
+
+            # Shift buffers down to age them by 1 step
+            shifted_t_Re = jax.tree.map(lambda x: jnp.roll(x, shift=1, axis=0), next_t_Re)
+            shifted_t_Im = jax.tree.map(lambda x: jnp.roll(x, shift=1, axis=0), next_t_Im)
+
+            # Inject the NEW perturbations at tau=0 (index 0)
+            # updated_t_Re kicks alpha_re by 1.0
+            updated_t_Re = (
+                shifted_t_Re[0].at[0].set(0.0),  
+                shifted_t_Re[1].at[0].set(1.0),  
+                shifted_t_Re[2].at[0].set(0.0)   
+            )
+            
+            # updated_t_Im kicks alpha_im by 1.0
+            updated_t_Im = (
+                shifted_t_Im[0].at[0].set(0.0),  
+                shifted_t_Im[1].at[0].set(0.0),  
+                shifted_t_Im[2].at[0].set(1.0)   
             )
 
-        _, (_, alpha_traj) = jax.lax.scan(scan_body, carry_init, jnp.arange(1, num_steps))
-        alpha_full = jnp.append(alpha0, alpha_traj)
-        
-        # --- THE EXACT TIME-DOMAIN SLIDING WINDOW (NO FFT) ---
-        def compute_C_tau(tau):
-            # Grab the unshifted base array of size `valid_length`
-            a_base = jax.lax.dynamic_slice_in_dim(alpha_full, 0, valid_length)
+            # Extract the alpha responses to calculate the commutator for this step
+            # Note: The buffer at index `tau` represents the response to a kick `tau` steps ago
+            resp_from_Re = updated_t_Re[1] + 1j * updated_t_Re[2]
+            resp_from_Im = updated_t_Im[1] + 1j * updated_t_Im[2]
             
-            # Grab the shifted array of the exact same size
+            # Form the exact Wigner commutator expectation value: 
+            # 0.5 * (d_alpha / d_Re - i * d_alpha / d_Im)
+            chi_step = 0.5 * (resp_from_Re - 1j * resp_from_Im)
+            
+            # Accumulate the time-integrated response
+            new_chi_acc = chi_acc + chi_step * dt
+
+            # Save the primal complex alpha for the classical Wigner correlation
+            complex_alpha_out = next_carry_ri[1] + 1j * next_carry_ri[2]
+
+            return (next_carry_ri, updated_t_Re, updated_t_Im, new_chi_acc), complex_alpha_out
+
+        final_loop_state, alpha_traj = jax.lax.scan(scan_body, loop_state, jnp.arange(1, num_steps))
+        
+        # Extract the fully integrated exact commutator
+        _, _, _, integrated_chi = final_loop_state
+        
+        # 3. EXACT TIME-DOMAIN SLIDING WINDOW (INTEGRATED)
+        alpha_full = jnp.append(alpha0_complex, alpha_traj)
+        
+        def compute_integrated_C_tau(tau):
+            # Grab the unshifted base array
+            a_base = jax.lax.dynamic_slice_in_dim(alpha_full, 0, valid_length)
+            # Grab the shifted array 
             a_shifted = jax.lax.dynamic_slice_in_dim(alpha_full, tau, valid_length)
             
-            # Return the exact time-average for this specific tau
-            return jnp.mean(jnp.conj(a_shifted) * a_base)
+            # Return the exact time-integral (sum * dt) for this specific tau
+            return jnp.sum(jnp.conj(a_shifted) * a_base) * dt
         
-        # Vectorize the exact calculation over all requested delay times
-        C_tau = jax.vmap(compute_C_tau)(tau_indices)
-        return C_tau
+        integrated_C_wigner = jax.vmap(compute_integrated_C_tau)(tau_indices)
+        
+        return integrated_C_wigner, integrated_chi
 
     @jax.jit
     def process_batch_sum(batch_keys):
-        batch_C = jax.vmap(solve_single_trajectory)(batch_keys)
-        return jnp.sum(batch_C, axis=0)
+        # We now return and sum BOTH the Wigner correlation and the dynamical Chi
+        batch_C, batch_chi = jax.vmap(solve_single_trajectory)(batch_keys)
+        return jnp.sum(batch_C, axis=0), jnp.sum(batch_chi, axis=0)
 
+    # Accumulators for the batch loop
     total_C_tau = jnp.zeros(tau_steps, dtype=jnp.complex64)
+    total_chi_tau = jnp.zeros(tau_steps, dtype=jnp.complex64)
+    
     n_batches = int(jnp.ceil(n_total / batch_size))
     
-    print(f"Computing Exact Time-Domain Correlation up to tau={tau_steps} steps...")
+    print(f"Computing Integrated Time-Domain Correlation & Linear Response up to tau={tau_steps} steps...")
     for i in tqdm(range(n_batches), desc="Autocorrelation Batches"):
         start_idx = i * batch_size
         end_idx = min((i + 1) * batch_size, n_total)
         current_keys = keys[start_idx:end_idx]
         
-        total_C_tau += process_batch_sum(current_keys)
+        batch_C_sum, batch_chi_sum = process_batch_sum(current_keys)
+        total_C_tau += batch_C_sum
+        total_chi_tau += batch_chi_sum
         
+    # Average over the total number of trajectories
     C_wigner_tau = total_C_tau / n_total
+    chi_tau_exact = total_chi_tau / n_total
     
-    # --- EXACT LINEAR RESPONSE (VACUUM SUBTRACTION) ---
+    # --- EXACT PHYSICAL CORRELATION ---
+    # The 0.5 factor is already baked into the `chi_step` calculation inside the scan
+    C_physical_tau = C_wigner_tau - chi_tau_exact
+    
     tau_time = tau_indices * dt
-    chi_tau = jnp.exp((1j * omega_0 - 0.5 * kappa) * tau_time)
     
-    # Physical Correlation: <a+(tau) a(0)> = C_Wigner - 0.5 * <[a(tau), a+(0)]>
-    C_physical_tau = C_wigner_tau - 0.5 * chi_tau
-    
-    return tau_time, C_physical_tau, C_wigner_tau
+    return tau_time, C_physical_tau
 
 def run_time_integrated_spin_correlation(keys, t_grid, omega_0, kappa, B_field, g, n_photons_initial, initial_direction, tau_steps=2000, batch_size=1000, n_spins=1):
     """
