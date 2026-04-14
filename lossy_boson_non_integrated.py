@@ -114,7 +114,7 @@ def run_coupled_twa_bundle(keys, t_grid, omega_0, kappa, B_field, g, n_photons_i
     n_batches = int(jnp.ceil(n_total / batch_size))
 
     print(f"Starting Non-Integrated (Markovian) DTWA: {n_total} trajectories in {n_batches} batches.")
-    
+     
     for i in tqdm(range(n_batches), desc="DTWA Expectations"):
         start_idx = i * batch_size
         end_idx = min((i + 1) * batch_size, n_total)
