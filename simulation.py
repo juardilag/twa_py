@@ -161,7 +161,7 @@ def run_1d_scaling_benchmark(n_spins_list, boson_truncation, g_ratio, kappa_rati
                              B_field_unit, v_init, tau_max, omega_0, num_steps, n_photons=1):
     """
     Benchmarks computation time and accuracy vs. QuTiP as a function of n_spins.
-    Uses pure JAX arrays and .at[].set() for in-place updates.
+    Correctly tracks both RMSE and NCC errors using JAX updates.
     """
     # 1. Scale parameters relative to omega_0
     kappa = kappa_ratio * omega_0
@@ -170,7 +170,6 @@ def run_1d_scaling_benchmark(n_spins_list, boson_truncation, g_ratio, kappa_rati
     
     t_max = tau_max / omega_0
     t_grid = jnp.linspace(0, t_max, num_steps)
-    t_grid_qutip = jnp.linspace(0, t_max, num_steps)
     
     # 2. Setup TWA PRNG Keys
     n_trajectories = 25_000 
@@ -179,14 +178,16 @@ def run_1d_scaling_benchmark(n_spins_list, boson_truncation, g_ratio, kappa_rati
     keys_int = jax.random.split(key_integrated, n_trajectories)
     keys_coup = jax.random.split(key_coupled, n_trajectories)
 
-    # 3. Initialize storage arrays as JAX arrays
+    # 3. Initialize ALL storage arrays distinctly
     num_points = len(n_spins_list)
     times_qutip = jnp.zeros(num_points)
     times_integrated = jnp.zeros(num_points)
     times_coupled = jnp.zeros(num_points)
     
-    errors_integrated = jnp.zeros(num_points)
-    errors_coupled = jnp.zeros(num_points)
+    errors_int_rmse = jnp.zeros(num_points)
+    errors_coup_rmse = jnp.zeros(num_points)
+    errors_int_ncc = jnp.zeros(num_points)
+    errors_coup_ncc = jnp.zeros(num_points)
 
     # 4. Run Benchmark Loop
     for i, n_spins in enumerate(n_spins_list):
@@ -201,10 +202,9 @@ def run_1d_scaling_benchmark(n_spins_list, boson_truncation, g_ratio, kappa_rati
         start_time = time.perf_counter()
         res = solve_dynamics_vacuum(
             Bx=B_scaled[0], By=B_scaled[1], Bz=B_scaled[2], 
-            wa=omega_0, g=g, kappa=kappa, times=t_grid_qutip, 
+            wa=omega_0, g=g, kappa=kappa, times=t_grid, 
             rho0=rho0, N_spins=n_spins, N_boson=boson_truncation
         )
-        # Use JAX .at[idx].set() syntax
         times_qutip = times_qutip.at[i].set(time.perf_counter() - start_time)
         
         # Extract and normalize QuTiP curves
@@ -223,11 +223,16 @@ def run_1d_scaling_benchmark(n_spins_list, boson_truncation, g_ratio, kappa_rati
         times_integrated = times_integrated.at[i].set(time.perf_counter() - start_time)
         
         # Extract, normalize, and compare Integrated DTWA
-        ix, iy, iz = twa_integrated_raw[:, 0]/twa_norm, twa_integrated_raw[:, 1]/twa_norm, twa_integrated_raw[:, 2]/twa_norm
+        ix = twa_integrated_raw[:, 0] / twa_norm
+        iy = twa_integrated_raw[:, 1] / twa_norm
+        iz = twa_integrated_raw[:, 2] / twa_norm
+        
+        # Overwrite the specific tracking array for Integrated
         err_int_ncc = compute_shape_error_ncc(qz, iz)
-        errors_integrated_ncc = errors_integrated.at[i].set(err_int_ncc)
+        errors_int_ncc = errors_int_ncc.at[i].set(err_int_ncc)
+        
         err_int_rmse = compute_curve_rmse(qx, qy, qz, ix, iy, iz)
-        errors_integrated_rmse = errors_integrated.at[i].set(err_int_rmse)
+        errors_int_rmse = errors_int_rmse.at[i].set(err_int_rmse)
         
         # --- Coupled DTWA Timing & Execution ---
         start_time = time.perf_counter()
@@ -240,10 +245,17 @@ def run_1d_scaling_benchmark(n_spins_list, boson_truncation, g_ratio, kappa_rati
         times_coupled = times_coupled.at[i].set(time.perf_counter() - start_time)
         
         # Extract, normalize, and compare Coupled DTWA
-        cx, cy, cz = twa_coupled_S[:, 0]/twa_norm, twa_coupled_S[:, 1]/twa_norm, twa_coupled_S[:, 2]/twa_norm
+        cx = twa_coupled_S[:, 0] / twa_norm
+        cy = twa_coupled_S[:, 1] / twa_norm
+        cz = twa_coupled_S[:, 2] / twa_norm
+        
+        # Overwrite the specific tracking array for Coupled
         err_coup_ncc = compute_shape_error_ncc(qz, cz)
-        errors_coupled_ncc = errors_coupled.at[i].set(err_coup_ncc)
+        errors_coup_ncc = errors_coup_ncc.at[i].set(err_coup_ncc)
+        
         err_coup_rmse = compute_curve_rmse(qx, qy, qz, cx, cy, cz)
-        errors_coupled_rmse = errors_integrated.at[i].set(err_coup_rmse)
+        errors_coup_rmse = errors_coup_rmse.at[i].set(err_coup_rmse)
 
-    return times_qutip, times_integrated, times_coupled, errors_integrated_rmse, errors_coupled_rmse, errors_integrated_ncc, errors_coupled_ncc
+    return (times_qutip, times_integrated, times_coupled, 
+            errors_int_rmse, errors_coup_rmse, 
+            errors_int_ncc, errors_coup_ncc)
