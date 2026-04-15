@@ -10,7 +10,7 @@ from lossy_boson_non_integrated import run_coupled_twa_bundle
 import time
 
 
-def run_normalized_simulation(g_ratio, kappa_ratio, B_field_unit, v_init, tau_max, omega_0, num_steps, n_photons=1, n_spins=1, boson_truncation=30, run_qutip=True):
+def run_normalized_simulation(g_ratio, kappa_ratio, B_field_unit, v_init, tau_max, omega_0, num_steps, n_photons=1, n_spins=1, boson_truncation=30):
     """
     Runs QuTiP, Integrated DTWA, and Explicit Coupled DTWA simulations 
     using normalized parameters for N spins, and calculates the emission spectrum.
@@ -136,6 +136,26 @@ def compute_curve_rmse(qutip_x, qutip_y, qutip_z, twa_x, twa_y, twa_z):
     # Return the pure JAX array instead of casting to Python float()
     return jnp.sqrt(mse)
 
+@jax.jit
+def compute_shape_error_ncc(qutip_z, twa_z):
+    """
+    Computes the Normalized Cross-Correlation (NCC) Error.
+    Standard ML metric for oscillatory shape matching.
+    """
+    # 1. Standardize both curves (Zero mean, Unit variance)
+    # This completely eliminates the amplitude/vertical gap penalty
+    q_norm = (qutip_z - jnp.mean(qutip_z)) / (jnp.std(qutip_z) + 1e-12)
+    t_norm = (twa_z - jnp.mean(twa_z)) / (jnp.std(twa_z) + 1e-12)
+    
+    # 2. Slide the curves over each other to find the best phase match
+    # Mode='full' computes all possible overlaps
+    correlation = jnp.correlate(q_norm, t_norm, mode='full') / len(qutip_z)
+    
+    # 3. Find the peak overlap. 
+    # A perfect shape match = 1.0. We subtract from 1.0 to turn it into an "Error"
+    best_match = jnp.max(correlation)
+    
+    return 1.0 - best_match
 
 def run_1d_scaling_benchmark(n_spins_list, boson_truncation, g_ratio, kappa_ratio, 
                              B_field_unit, v_init, tau_max, omega_0, num_steps, n_photons=1):
@@ -150,9 +170,10 @@ def run_1d_scaling_benchmark(n_spins_list, boson_truncation, g_ratio, kappa_rati
     
     t_max = tau_max / omega_0
     t_grid = jnp.linspace(0, t_max, num_steps)
+    t_grid_qutip = jnp.linspace(0, t_max, num_steps)
     
     # 2. Setup TWA PRNG Keys
-    n_trajectories = 50_000 
+    n_trajectories = 25_000 
     master_key = jax.random.PRNGKey(42)
     key_integrated, key_coupled = jax.random.split(master_key)
     keys_int = jax.random.split(key_integrated, n_trajectories)
@@ -180,7 +201,7 @@ def run_1d_scaling_benchmark(n_spins_list, boson_truncation, g_ratio, kappa_rati
         start_time = time.perf_counter()
         res = solve_dynamics_vacuum(
             Bx=B_scaled[0], By=B_scaled[1], Bz=B_scaled[2], 
-            wa=omega_0, g=g, kappa=kappa, times=t_grid, 
+            wa=omega_0, g=g, kappa=kappa, times=t_grid_qutip, 
             rho0=rho0, N_spins=n_spins, N_boson=boson_truncation
         )
         # Use JAX .at[idx].set() syntax
@@ -203,8 +224,10 @@ def run_1d_scaling_benchmark(n_spins_list, boson_truncation, g_ratio, kappa_rati
         
         # Extract, normalize, and compare Integrated DTWA
         ix, iy, iz = twa_integrated_raw[:, 0]/twa_norm, twa_integrated_raw[:, 1]/twa_norm, twa_integrated_raw[:, 2]/twa_norm
-        err_int = compute_curve_rmse(qx, qy, qz, ix, iy, iz)
-        errors_integrated = errors_integrated.at[i].set(err_int)
+        err_int_ncc = compute_shape_error_ncc(qz, iz)
+        errors_integrated_ncc = errors_integrated.at[i].set(err_int_ncc)
+        err_int_rmse = compute_curve_rmse(qx, qy, qz, ix, iy, iz)
+        errors_integrated_rmse = errors_integrated.at[i].set(err_int_rmse)
         
         # --- Coupled DTWA Timing & Execution ---
         start_time = time.perf_counter()
@@ -218,7 +241,9 @@ def run_1d_scaling_benchmark(n_spins_list, boson_truncation, g_ratio, kappa_rati
         
         # Extract, normalize, and compare Coupled DTWA
         cx, cy, cz = twa_coupled_S[:, 0]/twa_norm, twa_coupled_S[:, 1]/twa_norm, twa_coupled_S[:, 2]/twa_norm
-        err_coup = compute_curve_rmse(qx, qy, qz, cx, cy, cz)
-        errors_coupled = errors_coupled.at[i].set(err_coup)
+        err_coup_ncc = compute_shape_error_ncc(qz, cz)
+        errors_coupled_ncc = errors_coupled.at[i].set(err_coup_ncc)
+        err_coup_rmse = compute_curve_rmse(qx, qy, qz, cx, cy, cz)
+        errors_coupled_rmse = errors_integrated.at[i].set(err_coup_rmse)
 
-    return times_qutip, times_integrated, times_coupled, errors_integrated, errors_coupled
+    return times_qutip, times_integrated, times_coupled, errors_integrated_rmse, errors_coupled_rmse, errors_integrated_ncc, errors_coupled_ncc
